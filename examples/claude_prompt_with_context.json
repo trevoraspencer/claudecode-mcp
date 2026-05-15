@@ -1,0 +1,14 @@
+{
+  "jsonrpc": "2.0",
+  "id": 3,
+  "method": "tools/call",
+  "params": {
+    "name": "claude_prompt_with_context",
+    "arguments": {
+      "prompt": "Summarize the file contents above in one sentence.",
+      "context": "The file is part of the claudecode-mcp project.",
+      "files": ["README.md"],
+      "model": "haiku"
+    }
+  }
+}

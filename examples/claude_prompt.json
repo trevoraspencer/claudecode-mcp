@@ -1,0 +1,12 @@
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/call",
+  "params": {
+    "name": "claude_prompt",
+    "arguments": {
+      "prompt": "Reply with the single word: ping",
+      "model": "haiku"
+    }
+  }
+}
