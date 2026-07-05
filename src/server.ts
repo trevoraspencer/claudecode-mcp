@@ -181,9 +181,10 @@ const CLAUDE_PROMPT_STRUCTURED_TOOL = {
     "mode and return a structured JSON object. Requires `schema` (a JSON " +
     "Schema). The Claude CLI validates the output server-side via its " +
     "--json-schema flag; this server performs an additional lightweight " +
-    "sanity check (top-level type, required fields, recursive `properties` " +
-    "types only — does NOT check items/enum/min/max/pattern/etc). Returns " +
-    "the parsed JSON. Uses the server process's current working directory.",
+    "sanity check (top-level type, required fields, recursive `properties`/" +
+    "`items` type tags only — does NOT check enum/min/max/pattern/etc). " +
+    "Returns the parsed JSON. Uses the server process's current working " +
+    "directory.",
   inputSchema: {
     type: "object",
     properties: {
