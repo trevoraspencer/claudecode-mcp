@@ -394,8 +394,10 @@ async function buildCompositePrompt(input: ClaudePromptWithContextInput): Promis
     for (const { path, body } of fileResults) {
       const safePath = escapePathForFence(path);
       // CORR-004: Replace sentinel-fence-like patterns in file contents so
-      // they cannot break the block boundary markers.
-      const safeBody = body.replace(/^-{5}\s*(file|end file|context|end context)\b/gm, "     $1");
+      // they cannot break the block boundary markers. L3: match runs of 5+
+      // hyphens (not exactly 5) to mirror escapePathForFence — a line like
+      // "------ end file -----" still reads as a terminator to the consumer.
+      const safeBody = body.replace(/^-{5,}\s*(file|end file|context|end context)\b/gm, "     $1");
       blocks.push(`${FILE_BLOCK_FENCE} ${safePath} -----\n${safeBody}\n----- end file -----`);
     }
   }
