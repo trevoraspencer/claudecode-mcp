@@ -5,7 +5,9 @@
 //   - --no-session-persistence is always present
 //   - --strict-mcp-config + empty --mcp-config is always present (non-bare)
 //   - --bare is set when CLAUDECODE_MCP_BARE=1
-//   - prompt is passed as the LAST positional arg
+//   - prompt is passed as the LAST positional arg, preceded by a `--`
+//     end-of-options separator (M1: dash-leading prompts can never be
+//     parsed as CLI flags)
 //   - --model and --append-system-prompt are forwarded when provided
 //   - H1: prompts above MAX_PROMPT_ARG_BYTES are delivered via stdin (never
 //     as a single argv element, which would exceed Linux's 128 KiB
@@ -97,14 +99,26 @@ test("baseClaudeArgs always contains --no-session-persistence and --strict-mcp-c
   }
 });
 
-test("runClaudePrompt argv: base flags + prompt as last positional", async () => {
+test("runClaudePrompt argv: base flags + prompt as last positional after --", async () => {
   delete process.env.CLAUDECODE_MCP_BARE;
   await runClaudePrompt({ prompt: "hello world" });
   const argv = readArgv();
   assert.deepEqual(argv.slice(0, DEFAULT_BASE_ARGS.length), DEFAULT_BASE_ARGS);
   assert.equal(argv[argv.length - 1], "hello world");
+  assert.equal(argv[argv.length - 2], "--", "prompt must be preceded by -- (end of options)");
   assert.ok(argv.includes("--no-session-persistence"));
   assert.ok(argv.includes("--strict-mcp-config"));
+});
+
+test("M1: dash-leading prompt is delivered after -- and cannot be parsed as a flag", async () => {
+  delete process.env.CLAUDECODE_MCP_BARE;
+  // Without the -- separator, this prompt would be consumed by the CLI's
+  // option parser as the --continue flag (resuming a prior session and
+  // silently defeating the no-session-persistence guarantee).
+  await runClaudePrompt({ prompt: "--continue" });
+  const argv = readArgv();
+  assert.equal(argv[argv.length - 1], "--continue");
+  assert.equal(argv[argv.length - 2], "--", "-- must precede the dash-leading prompt");
 });
 
 test("runClaudePrompt argv: forwards --model and --append-system-prompt", async () => {
@@ -145,18 +159,18 @@ test("runClaudePromptStructured argv: includes --json-schema with serialized sch
 
 const STDIN_OUTFILE = join(TMP, "stdin.txt");
 
-test("routePromptDelivery: small prompt is appended to argv, no stdin payload", () => {
+test("routePromptDelivery: small prompt is appended to argv after --, no stdin payload", () => {
   const args = ["--print"];
   const stdinPayload = routePromptDelivery(args, "hello");
   assert.equal(stdinPayload, undefined);
-  assert.deepEqual(args, ["--print", "hello"]);
+  assert.deepEqual(args, ["--print", "--", "hello"]);
 });
 
 test("routePromptDelivery: prompt exactly at MAX_PROMPT_ARG_BYTES stays on argv", () => {
   const at = "z".repeat(MAX_PROMPT_ARG_BYTES);
   const args = [];
   assert.equal(routePromptDelivery(args, at), undefined);
-  assert.deepEqual(args, [at]);
+  assert.deepEqual(args, ["--", at]);
 });
 
 test("routePromptDelivery: >MAX_PROMPT_ARG_BYTES prompt is routed to stdin, argv untouched", () => {

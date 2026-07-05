@@ -251,14 +251,20 @@ export const MAX_PROMPT_ARG_BYTES = 100 * 1024;
  * limit). `claude --print` reads the prompt from stdin when no positional
  * prompt argument is given (`--input-format` defaults to "text").
  *
- * Mutates `args` (appends the prompt as the last positional) when the prompt
- * fits on argv and returns undefined; otherwise leaves `args` untouched and
- * returns the prompt to be passed as the subprocess's stdin.
+ * M1: When the prompt travels on argv it is preceded by a `--` end-of-options
+ * separator so the CLI can never parse prompt text as flags. Without it, a
+ * prompt beginning with `-` (e.g. "--continue", or any composite prompt —
+ * composites always start with a "----- context/file -----" fence) would be
+ * consumed by the CLI's option parser instead of being sent to the model.
+ *
+ * Mutates `args` (appends `--` and the prompt as the last positional) when
+ * the prompt fits on argv and returns undefined; otherwise leaves `args`
+ * untouched and returns the prompt to be passed as the subprocess's stdin.
  */
 export function routePromptDelivery(args: string[], prompt: string): string | undefined {
   const promptBytes = Buffer.byteLength(prompt, "utf8");
   if (promptBytes <= MAX_PROMPT_ARG_BYTES) {
-    args.push(prompt);
+    args.push("--", prompt);
     return undefined;
   }
   debugLog({ phase: "prompt_via_stdin", prompt_bytes: promptBytes });

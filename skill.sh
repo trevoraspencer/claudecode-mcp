@@ -11,4 +11,5 @@ exec claude \
   --permission-mode bypassPermissions \
   --no-session-persistence \
   --output-format json \
+  -- \
   "$PROMPT"
