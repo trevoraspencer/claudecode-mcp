@@ -101,6 +101,40 @@ test("structured_output absent rejects with no-structured-output error", async (
   }
 });
 
+// L2: The no-structured_output summary must redact BEFORE truncating. If the
+// raw result is sliced to 200 chars first, a secret straddling the boundary
+// no longer exact-matches the env-value replaceAll in redactSecrets and its
+// prefix leaks into the error message.
+test("no-structured_output summary redacts secrets that straddle the 200-char boundary", async () => {
+  const secret = "test-secret-value-abcdefghijklmnopqrstuvwxyz-0123456789";
+  const origKey = process.env.ANTHROPIC_API_KEY;
+  process.env.ANTHROPIC_API_KEY = secret;
+  process.env.CLAUDECODE_MCP_FAKE_MODE = "missing_structured";
+  // Place the secret across the 200-char truncation boundary (starts at 180).
+  process.env.CLAUDECODE_MCP_FAKE_RESULT_TEXT = "r".repeat(180) + secret;
+  try {
+    await assert.rejects(
+      () =>
+        runClaudePromptStructured({
+          prompt: "x",
+          schema: { type: "object", required: ["name"] },
+        }),
+      (err) => {
+        const msg = err && err.message ? err.message : String(err);
+        assert.match(msg, /no structured_output field/);
+        assert.ok(!msg.includes("test-secret-value"), "secret prefix must not leak: " + msg);
+        assert.ok(msg.includes("***"), "secret must be redacted to ***");
+        return true;
+      },
+    );
+  } finally {
+    if (origKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = origKey;
+    delete process.env.CLAUDECODE_MCP_FAKE_MODE;
+    delete process.env.CLAUDECODE_MCP_FAKE_RESULT_TEXT;
+  }
+});
+
 test("claude_prompt_structured without schema fails loudly", async () => {
   process.env.CLAUDECODE_MCP_FAKE_MODE = "ok";
   try {

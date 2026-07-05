@@ -344,7 +344,10 @@ export async function runClaudePromptStructured(
   // summary and must NOT be parsed as the structured payload.
   const parsed = outerObj.structured_output;
   if (parsed === undefined) {
-    const summary = sanitizeForClient(String(outerObj.result ?? "").slice(0, 200));
+    // L2: Redact before truncating (matching every other call site). Slicing
+    // first could cut a secret at the boundary so it no longer exact-matches
+    // the env-value replaceAll in redactSecrets, leaking the secret's prefix.
+    const summary = sanitizeForClient(String(outerObj.result ?? "")).slice(0, 200);
     throw new Error(`claude CLI returned no structured_output field (result: ${summary})`);
   }
   validateAgainstSchema(parsed, input.schema);
