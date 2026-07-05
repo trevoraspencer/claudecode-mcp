@@ -236,6 +236,35 @@ export function baseClaudeArgs(): string[] {
   return args;
 }
 
+/**
+ * H1: Maximum prompt size (in UTF-8 bytes) that may travel as a single argv
+ * element. Linux caps each argv string at MAX_ARG_STRLEN (128 KiB); larger
+ * prompts made spawn fail with a raw `E2BIG` before the CLI even started,
+ * which broke the documented 5 MB per-file context capacity. 100 KiB leaves
+ * headroom under the 128 KiB OS limit.
+ */
+export const MAX_PROMPT_ARG_BYTES = 100 * 1024;
+
+/**
+ * H1: Route the prompt onto argv (small prompts — preserves the existing
+ * argv contract) or via stdin (large prompts — avoids the per-argument OS
+ * limit). `claude --print` reads the prompt from stdin when no positional
+ * prompt argument is given (`--input-format` defaults to "text").
+ *
+ * Mutates `args` (appends the prompt as the last positional) when the prompt
+ * fits on argv and returns undefined; otherwise leaves `args` untouched and
+ * returns the prompt to be passed as the subprocess's stdin.
+ */
+export function routePromptDelivery(args: string[], prompt: string): string | undefined {
+  const promptBytes = Buffer.byteLength(prompt, "utf8");
+  if (promptBytes <= MAX_PROMPT_ARG_BYTES) {
+    args.push(prompt);
+    return undefined;
+  }
+  debugLog({ phase: "prompt_via_stdin", prompt_bytes: promptBytes });
+  return prompt;
+}
+
 // ── Shared invocation helper (ARCH-004) ──────────────────────────────
 
 /**
@@ -245,8 +274,12 @@ export function baseClaudeArgs(): string[] {
  *
  * @throws {Error} on non-zero exit code or parse failure
  */
-async function invokeClaudeAndParse(args: string[], parseErrorPrefix: string): Promise<unknown> {
-  const result = await invokeCli(getClaudeBin(), args, { cwd: process.cwd() });
+async function invokeClaudeAndParse(
+  args: string[],
+  parseErrorPrefix: string,
+  stdin?: string,
+): Promise<unknown> {
+  const result = await invokeCli(getClaudeBin(), args, { cwd: process.cwd(), stdin });
 
   if (result.exitCode !== 0) {
     throw exitError(result.exitCode, result.stderr, result.stdout);
@@ -291,9 +324,10 @@ export async function runClaudePromptStructured(
   if (input.system_prompt) {
     args.push("--append-system-prompt", input.system_prompt);
   }
-  args.push(input.prompt);
+  // H1: Large prompts travel via stdin instead of argv to avoid E2BIG.
+  const stdinPrompt = routePromptDelivery(args, input.prompt);
 
-  const rawParsed = await invokeClaudeAndParse(args, "claude_prompt_structured");
+  const rawParsed = await invokeClaudeAndParse(args, "claude_prompt_structured", stdinPrompt);
   if (!rawParsed || typeof rawParsed !== "object" || Array.isArray(rawParsed)) {
     throw new Error("claude CLI returned a non-object payload");
   }
@@ -385,11 +419,14 @@ export async function runClaudePrompt(input: ClaudePromptInput): Promise<string>
   if (input.system_prompt) {
     args.push("--append-system-prompt", input.system_prompt);
   }
-  args.push(input.prompt);
+  // H1: Large prompts (including composites built from up-to-5 MB context
+  // files) travel via stdin instead of argv to avoid E2BIG.
+  const stdinPrompt = routePromptDelivery(args, input.prompt);
 
   const parsed = await invokeClaudeAndParse(
     args,
     "claude CLI output was not parseable JSON (--output-format json expected)",
+    stdinPrompt,
   );
   if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
     const obj = parsed as Record<string, unknown>;

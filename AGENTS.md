@@ -72,6 +72,11 @@ Tests live in `test/` and import compiled modules from `dist/`.
   server process.
 - Spawn the `claude` CLI with argv arrays only. Do not build shell command
   strings from prompts or user input.
+- Prompts above `MAX_PROMPT_ARG_BYTES` (100 KiB) must be delivered to the
+  child via stdin, never as a positional argv element: Linux caps a single
+  argv string at 128 KiB (`MAX_ARG_STRLEN`), and anything larger fails the
+  spawn with `E2BIG`. Keep prompt routing centralized in
+  `routePromptDelivery()`.
 - Keep CLI flag construction centralized in `baseClaudeArgs()`.
 - Default mode must not load the user's MCP servers. Non-bare calls must pin
   `--strict-mcp-config --mcp-config '{"mcpServers":{}}'`.

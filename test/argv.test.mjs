@@ -7,6 +7,9 @@
 //   - --bare is set when CLAUDECODE_MCP_BARE=1
 //   - prompt is passed as the LAST positional arg
 //   - --model and --append-system-prompt are forwarded when provided
+//   - H1: prompts above MAX_PROMPT_ARG_BYTES are delivered via stdin (never
+//     as a single argv element, which would exceed Linux's 128 KiB
+//     MAX_ARG_STRLEN and fail the spawn with E2BIG)
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -34,8 +37,13 @@ process.env.CLAUDECODE_MCP_FAKE_OUTFILE = OUTFILE;
 process.env.CLAUDECODE_MCP_FAKE_HAS_JSON_SCHEMA = "1";
 process.env.CLAUDECODE_MCP_FAKE_MODE = "ok";
 
-const { runClaudePrompt, runClaudePromptStructured, baseClaudeArgs } =
-  await import("../dist/server.js");
+const {
+  runClaudePrompt,
+  runClaudePromptStructured,
+  baseClaudeArgs,
+  routePromptDelivery,
+  MAX_PROMPT_ARG_BYTES,
+} = await import("../dist/server.js");
 
 function readArgv() {
   return JSON.parse(readFileSync(OUTFILE, "utf8"));
@@ -128,6 +136,90 @@ test("runClaudePromptStructured argv: includes --json-schema with serialized sch
   // Base invariants still hold.
   assert.ok(argv.includes("--no-session-persistence"));
   assert.ok(argv.includes("--print"));
+});
+
+// ── H1: large prompts must travel via stdin, not argv ────────────────
+// Linux caps a single argv element at MAX_ARG_STRLEN (128 KiB). Before the
+// fix, any prompt larger than that rejected at spawn with a raw `E2BIG`,
+// making the documented 5 MB file-context capacity unusable.
+
+const STDIN_OUTFILE = join(TMP, "stdin.txt");
+
+test("routePromptDelivery: small prompt is appended to argv, no stdin payload", () => {
+  const args = ["--print"];
+  const stdinPayload = routePromptDelivery(args, "hello");
+  assert.equal(stdinPayload, undefined);
+  assert.deepEqual(args, ["--print", "hello"]);
+});
+
+test("routePromptDelivery: prompt exactly at MAX_PROMPT_ARG_BYTES stays on argv", () => {
+  const at = "z".repeat(MAX_PROMPT_ARG_BYTES);
+  const args = [];
+  assert.equal(routePromptDelivery(args, at), undefined);
+  assert.deepEqual(args, [at]);
+});
+
+test("routePromptDelivery: >MAX_PROMPT_ARG_BYTES prompt is routed to stdin, argv untouched", () => {
+  const big = "y".repeat(MAX_PROMPT_ARG_BYTES + 1);
+  const args = ["--print"];
+  assert.equal(routePromptDelivery(args, big), big);
+  assert.deepEqual(args, ["--print"], "large prompt must not be appended to argv");
+});
+
+test("routePromptDelivery: threshold is measured in UTF-8 bytes, not characters", () => {
+  // "é" is 2 bytes in UTF-8, so this string is under the threshold in
+  // characters but over it in bytes — it must be routed via stdin.
+  const multiByte = "é".repeat(Math.floor(MAX_PROMPT_ARG_BYTES / 2) + 1);
+  assert.ok(multiByte.length <= MAX_PROMPT_ARG_BYTES);
+  const args = [];
+  assert.equal(routePromptDelivery(args, multiByte), multiByte);
+  assert.deepEqual(args, []);
+});
+
+test("MAX_PROMPT_ARG_BYTES leaves headroom under Linux MAX_ARG_STRLEN (128 KiB)", () => {
+  assert.ok(MAX_PROMPT_ARG_BYTES < 128 * 1024);
+});
+
+test("H1: runClaudePrompt delivers a >128 KiB prompt via stdin (no E2BIG)", async () => {
+  delete process.env.CLAUDECODE_MCP_BARE;
+  process.env.CLAUDECODE_MCP_FAKE_STDIN_OUTFILE = STDIN_OUTFILE;
+  try {
+    // 200 KiB — over Linux's 128 KiB per-argv-element cap. As a single argv
+    // element this spawn would reject with E2BIG before the fix.
+    const bigPrompt = "x".repeat(200 * 1024);
+    const out = await runClaudePrompt({ prompt: bigPrompt });
+    assert.equal(out, "ok-response", "spawn must succeed — no E2BIG");
+    const argv = readArgv();
+    assert.deepEqual(argv, DEFAULT_BASE_ARGS, "argv must contain flags only, no positional prompt");
+    const received = readFileSync(STDIN_OUTFILE, "utf8");
+    assert.equal(received, bigPrompt, "child must receive the full prompt on stdin");
+  } finally {
+    delete process.env.CLAUDECODE_MCP_FAKE_STDIN_OUTFILE;
+  }
+});
+
+test("H1: runClaudePromptStructured delivers a >128 KiB prompt via stdin (no E2BIG)", async () => {
+  delete process.env.CLAUDECODE_MCP_BARE;
+  process.env.CLAUDECODE_MCP_FAKE_STDIN_OUTFILE = STDIN_OUTFILE;
+  try {
+    const schema = { type: "object", required: ["name"] };
+    const bigPrompt = "s".repeat(200 * 1024);
+    const json = await runClaudePromptStructured({ prompt: bigPrompt, schema });
+    assert.deepEqual(json, { name: "stub" });
+    const argv = readArgv();
+    const schemaIdx = argv.indexOf("--json-schema");
+    assert.ok(schemaIdx >= 0, "argv must still include --json-schema");
+    assert.equal(
+      argv[argv.length - 1],
+      JSON.stringify(schema),
+      "schema value is the last argv element — no positional prompt",
+    );
+    assert.ok(!argv.includes(bigPrompt), "large prompt must not be on argv");
+    const received = readFileSync(STDIN_OUTFILE, "utf8");
+    assert.equal(received, bigPrompt, "child must receive the full prompt on stdin");
+  } finally {
+    delete process.env.CLAUDECODE_MCP_FAKE_STDIN_OUTFILE;
+  }
 });
 
 test("no shell interpolation: prompt with $(...) and backticks is passed verbatim", async () => {

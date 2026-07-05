@@ -136,7 +136,12 @@ fall back to `claude_prompt`.
 
 - No session tracking. No `session_id` in tool inputs. `--no-session-persistence` always.
 - No `working_dir` parameter. Uses `process.cwd()` of the MCP server process.
-- Argv array spawning — never shell-interpolated.
+- Argv array spawning — never shell-interpolated. Prompts larger than 100 KiB
+  are delivered to the CLI via stdin instead of a positional argument (in
+  `--print` mode the CLI reads the prompt from stdin when no positional is
+  given). This stays under the OS per-argument size limit (Linux
+  `MAX_ARG_STRLEN`, 128 KiB), so large contexts — up to the 5 MB per-file
+  cap — spawn successfully instead of failing with `E2BIG`.
 - `--bare` is opt-in via `CLAUDECODE_MCP_BARE=1`. Default keeps OAuth/keychain
   auth working, but pins `--strict-mcp-config --mcp-config '{"mcpServers":{}}'`
   so the wrapped subprocess does NOT load the user's own MCP servers (avoids
