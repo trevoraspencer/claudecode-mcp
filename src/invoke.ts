@@ -443,7 +443,7 @@ export function parseJsonLoose(raw: string): unknown {
 /**
  * Redact known secret patterns from text (sk-ant-* tokens, Bearer headers,
  * AWS key patterns). This is a lightweight version for use in invoke.ts; the
- * full sanitizer (including env-var value redaction) lives in server.ts.
+ * full sanitizer (including env-var value redaction) lives in redaction.ts.
  */
 export function redactBasicSecrets(text: string): string {
   let out = text;
