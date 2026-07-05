@@ -12,19 +12,16 @@ export class PathGuardError extends Error {
 }
 
 /**
- * Resolve a user-supplied relative path strictly under cwd. Rejects absolute
- * paths, ../ escapes, and symlinks that resolve outside cwd. Also enforces a
- * per-file size cap before the caller reads it.
+ * Shared phase 1 (L8): resolve a user-supplied relative path strictly under
+ * cwd and enforce symlink containment. Rejects absolute paths, ../ escapes,
+ * and symlinks that resolve outside cwd; maps ENOENT to a friendly error.
+ * Returns the realpath of the target for the caller's phase-2 checks.
  *
  * PERF-003: Accepts an optional pre-computed `baseReal` (realpath of cwd) so
  * callers that resolve multiple files per request can avoid redundant
  * realpath() syscalls. When omitted, realpath(cwd) is computed per call.
  */
-export async function safeResolveUnderCwd(
-  input: string,
-  cwd: string = process.cwd(),
-  baseReal?: string,
-): Promise<string> {
+async function resolveRealUnderCwd(input: string, cwd: string, baseReal?: string): Promise<string> {
   if (isAbsolute(input)) {
     throw new PathGuardError(`path must be relative: ${input}`);
   }
@@ -47,6 +44,24 @@ export async function safeResolveUnderCwd(
   if (real !== resolvedBase && !real.startsWith(prefix)) {
     throw new PathGuardError(`path resolves outside working directory via symlink: ${input}`);
   }
+  return real;
+}
+
+/**
+ * Resolve a user-supplied relative path strictly under cwd. Rejects absolute
+ * paths, ../ escapes, and symlinks that resolve outside cwd. Also enforces a
+ * per-file size cap before the caller reads it.
+ *
+ * PERF-003: Accepts an optional pre-computed `baseReal` (realpath of cwd) so
+ * callers that resolve multiple files per request can avoid redundant
+ * realpath() syscalls. When omitted, realpath(cwd) is computed per call.
+ */
+export async function safeResolveUnderCwd(
+  input: string,
+  cwd: string = process.cwd(),
+  baseReal?: string,
+): Promise<string> {
+  const real = await resolveRealUnderCwd(input, cwd, baseReal);
   const info = await stat(real);
   if (!info.isFile()) {
     throw new PathGuardError(`not a regular file: ${input}`);
@@ -78,29 +93,9 @@ export async function safeReadFileUnderCwd(
   cwd: string = process.cwd(),
   baseReal?: string,
 ): Promise<string> {
-  // Phase 1: Path resolution and symlink containment (same as safeResolveUnderCwd)
-  if (isAbsolute(input)) {
-    throw new PathGuardError(`path must be relative: ${input}`);
-  }
-  const resolvedBase = baseReal ?? (await realpath(cwd));
-  const resolved = resolve(resolvedBase, input);
-  const prefix = resolvedBase.endsWith(sep) ? resolvedBase : resolvedBase + sep;
-  if (resolved !== resolvedBase && !resolved.startsWith(prefix)) {
-    throw new PathGuardError(`path escapes working directory: ${input}`);
-  }
-  let real: string;
-  try {
-    real = await realpath(resolved);
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code;
-    if (code === "ENOENT") {
-      throw new PathGuardError(`file not found: ${input}`);
-    }
-    throw err;
-  }
-  if (real !== resolvedBase && !real.startsWith(prefix)) {
-    throw new PathGuardError(`path resolves outside working directory via symlink: ${input}`);
-  }
+  // Phase 1: Path resolution and symlink containment (shared with
+  // safeResolveUnderCwd via resolveRealUnderCwd).
+  const real = await resolveRealUnderCwd(input, cwd, baseReal);
 
   // Phase 2: Open fd, validate via fstat, and read atomically.
   const fh = await open(real, "r");

@@ -19,7 +19,9 @@
 //                            `structured_output: { name: "stub" }`
 //       "exit_nonzero"       prints to stderr and exits 1
 //       "malformed_json"     prints non-JSON garbage on stdout, exits 0
-//       "missing_structured" prints {"result":"..."} with no structured_output
+//       "missing_structured" prints {"result":"..."} with no structured_output;
+//                            the result text is CLAUDECODE_MCP_FAKE_RESULT_TEXT
+//                            when set (used to test redact-before-truncate, L2)
 //       "wrong_structured"   prints structured_output with the wrong shape
 //       "hang"               sleeps forever — used to exercise timeout
 //       "huge_output"        spews ~120MB of stdout — used to exercise the
@@ -84,7 +86,11 @@ switch (mode) {
     process.stdout.write("zzz this is not json output\nneither is this\n");
     process.exit(0);
   case "missing_structured":
-    process.stdout.write(JSON.stringify({ result: "summary text" }) + "\n");
+    process.stdout.write(
+      JSON.stringify({
+        result: process.env.CLAUDECODE_MCP_FAKE_RESULT_TEXT ?? "summary text",
+      }) + "\n",
+    );
     process.exit(0);
   case "wrong_structured":
     process.stdout.write(

@@ -141,7 +141,9 @@ fall back to `claude_prompt`.
   `--print` mode the CLI reads the prompt from stdin when no positional is
   given). This stays under the OS per-argument size limit (Linux
   `MAX_ARG_STRLEN`, 128 KiB), so large contexts — up to the 5 MB per-file
-  cap — spawn successfully instead of failing with `E2BIG`.
+  cap — spawn successfully instead of failing with `E2BIG`. Prompts that do
+  travel on argv are preceded by a `--` end-of-options separator, so prompt
+  text beginning with `-` can never be parsed as CLI flags.
 - `--bare` is opt-in via `CLAUDECODE_MCP_BARE=1`. Default keeps OAuth/keychain
   auth working, but pins `--strict-mcp-config --mcp-config '{"mcpServers":{}}'`
   so the wrapped subprocess does NOT load the user's own MCP servers (avoids

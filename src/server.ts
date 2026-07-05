@@ -181,9 +181,10 @@ const CLAUDE_PROMPT_STRUCTURED_TOOL = {
     "mode and return a structured JSON object. Requires `schema` (a JSON " +
     "Schema). The Claude CLI validates the output server-side via its " +
     "--json-schema flag; this server performs an additional lightweight " +
-    "sanity check (top-level type, required fields, recursive `properties` " +
-    "types only — does NOT check items/enum/min/max/pattern/etc). Returns " +
-    "the parsed JSON. Uses the server process's current working directory.",
+    "sanity check (top-level type, required fields, recursive `properties`/" +
+    "`items` type tags only — does NOT check enum/min/max/pattern/etc). " +
+    "Returns the parsed JSON. Uses the server process's current working " +
+    "directory.",
   inputSchema: {
     type: "object",
     properties: {
@@ -251,14 +252,20 @@ export const MAX_PROMPT_ARG_BYTES = 100 * 1024;
  * limit). `claude --print` reads the prompt from stdin when no positional
  * prompt argument is given (`--input-format` defaults to "text").
  *
- * Mutates `args` (appends the prompt as the last positional) when the prompt
- * fits on argv and returns undefined; otherwise leaves `args` untouched and
- * returns the prompt to be passed as the subprocess's stdin.
+ * M1: When the prompt travels on argv it is preceded by a `--` end-of-options
+ * separator so the CLI can never parse prompt text as flags. Without it, a
+ * prompt beginning with `-` (e.g. "--continue", or any composite prompt —
+ * composites always start with a "----- context/file -----" fence) would be
+ * consumed by the CLI's option parser instead of being sent to the model.
+ *
+ * Mutates `args` (appends `--` and the prompt as the last positional) when
+ * the prompt fits on argv and returns undefined; otherwise leaves `args`
+ * untouched and returns the prompt to be passed as the subprocess's stdin.
  */
 export function routePromptDelivery(args: string[], prompt: string): string | undefined {
   const promptBytes = Buffer.byteLength(prompt, "utf8");
   if (promptBytes <= MAX_PROMPT_ARG_BYTES) {
-    args.push(prompt);
+    args.push("--", prompt);
     return undefined;
   }
   debugLog({ phase: "prompt_via_stdin", prompt_bytes: promptBytes });
@@ -338,7 +345,10 @@ export async function runClaudePromptStructured(
   // summary and must NOT be parsed as the structured payload.
   const parsed = outerObj.structured_output;
   if (parsed === undefined) {
-    const summary = sanitizeForClient(String(outerObj.result ?? "").slice(0, 200));
+    // L2: Redact before truncating (matching every other call site). Slicing
+    // first could cut a secret at the boundary so it no longer exact-matches
+    // the env-value replaceAll in redactSecrets, leaking the secret's prefix.
+    const summary = sanitizeForClient(String(outerObj.result ?? "")).slice(0, 200);
     throw new Error(`claude CLI returned no structured_output field (result: ${summary})`);
   }
   validateAgainstSchema(parsed, input.schema);
@@ -385,8 +395,10 @@ async function buildCompositePrompt(input: ClaudePromptWithContextInput): Promis
     for (const { path, body } of fileResults) {
       const safePath = escapePathForFence(path);
       // CORR-004: Replace sentinel-fence-like patterns in file contents so
-      // they cannot break the block boundary markers.
-      const safeBody = body.replace(/^-{5}\s*(file|end file|context|end context)\b/gm, "     $1");
+      // they cannot break the block boundary markers. L3: match runs of 5+
+      // hyphens (not exactly 5) to mirror escapePathForFence — a line like
+      // "------ end file -----" still reads as a terminator to the consumer.
+      const safeBody = body.replace(/^-{5,}\s*(file|end file|context|end context)\b/gm, "     $1");
       blocks.push(`${FILE_BLOCK_FENCE} ${safePath} -----\n${safeBody}\n----- end file -----`);
     }
   }

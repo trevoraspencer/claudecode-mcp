@@ -297,8 +297,9 @@ export function invokeCli(
       }
     };
 
-    let killTimer: NodeJS.Timeout = setTimeout(() => undefined, 0);
-    clearTimeout(killTimer);
+    // L9: undefined until SIGTERM escalation is armed — clearTimeout accepts
+    // undefined, so no placeholder timer needs to be allocated per spawn.
+    let killTimer: NodeJS.Timeout | undefined;
 
     const timer = setTimeout(() => {
       timedOut = true;

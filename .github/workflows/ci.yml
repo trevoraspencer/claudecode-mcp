@@ -25,10 +25,10 @@ jobs:
         node: ['20', '22']
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Set up Node.js ${{ matrix.node }}
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: ${{ matrix.node }}
           cache: npm
@@ -48,8 +48,13 @@ jobs:
       - name: Test (offline)
         run: npm test
 
+      # L6: Non-blocking by design (see CHANGELOG 1.0.1: "surface new
+      # HIGH-severity advisories") — a new advisory in a transitive dep
+      # should warn, not fail every unrelated PR.
       - name: Audit production dependencies (high+)
         run: npm audit --omit=dev --audit-level=high
+        continue-on-error: true
 
       - name: Audit all dependencies (high+)
         run: npm audit --audit-level=high
+        continue-on-error: true
