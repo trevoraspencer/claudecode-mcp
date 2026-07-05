@@ -48,8 +48,13 @@ jobs:
       - name: Test (offline)
         run: npm test
 
+      # L6: Non-blocking by design (see CHANGELOG 1.0.1: "surface new
+      # HIGH-severity advisories") — a new advisory in a transitive dep
+      # should warn, not fail every unrelated PR.
       - name: Audit production dependencies (high+)
         run: npm audit --omit=dev --audit-level=high
+        continue-on-error: true
 
       - name: Audit all dependencies (high+)
         run: npm audit --audit-level=high
+        continue-on-error: true
