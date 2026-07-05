@@ -139,10 +139,7 @@ test("SEC-006: AWS access key ID pattern (AKIA) is redacted in error messages", 
   const awsAccessKeyId = ["AKIA", "IOSFODNN7EXAMPLE"].join("");
   const input = `error with key ${awsAccessKeyId}`;
   const redacted = redactBasicSecrets(input);
-  assert.ok(
-    !redacted.includes(awsAccessKeyId),
-    `AKIA key should be redacted, got: ${redacted}`,
-  );
+  assert.ok(!redacted.includes(awsAccessKeyId), `AKIA key should be redacted, got: ${redacted}`);
 });
 
 test("SEC-006: AWS temporary key ID pattern (ASIA) is redacted", async () => {
@@ -150,10 +147,7 @@ test("SEC-006: AWS temporary key ID pattern (ASIA) is redacted", async () => {
   const awsTemporaryKeyId = ["ASIA", "IOSFODNN7EXAMPLE"].join("");
   const input = `error with key ${awsTemporaryKeyId}`;
   const redacted = redactBasicSecrets(input);
-  assert.ok(
-    !redacted.includes(awsTemporaryKeyId),
-    `ASIA key should be redacted, got: ${redacted}`,
-  );
+  assert.ok(!redacted.includes(awsTemporaryKeyId), `ASIA key should be redacted, got: ${redacted}`);
 });
 
 // ---------------------------------------------------------------------------
@@ -306,14 +300,18 @@ test("SEC-007: large input produces a debug log warning", async () => {
 
   try {
     // Create a prompt > 1MB to trigger the warning.
-    // NOTE: The spawn may fail with E2BIG due to OS argv limits,
-    // but the debug log warning should still fire before the spawn attempt.
+    // H1: prompts above MAX_PROMPT_ARG_BYTES are delivered via stdin, so this
+    // call must succeed — it must NOT fail with E2BIG from OS argv limits.
     const bigPrompt = "x".repeat(1_000_001);
     const result = await handleCallTool({
       params: { name: "claude_prompt", arguments: { prompt: bigPrompt } },
     });
-    // The request may or may not succeed depending on OS limits — the
-    // important thing is that the large_input debug log fires.
+    assert.notEqual(
+      result.isError,
+      true,
+      `>1MB prompt must not fail at spawn (H1): ${result.content?.[0]?.text}`,
+    );
+    assert.equal(result.content[0].text, "ok-response");
 
     const logOutput = chunks.join("");
     assert.match(logOutput, /large_input/, "debug log should contain large_input warning");

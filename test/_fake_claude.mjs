@@ -7,6 +7,11 @@
 //                                         (JSON array) to this file on each
 //                                         non-`--help` invocation. Tests read
 //                                         this back to assert on argv shape.
+//   CLAUDECODE_MCP_FAKE_STDIN_OUTFILE   - if set, the stub drains stdin to EOF
+//                                         and writes the received bytes to this
+//                                         file before dispatching on FAKE_MODE.
+//                                         Tests read this back to assert that
+//                                         large prompts arrive via stdin (H1).
 //   CLAUDECODE_MCP_FAKE_HAS_JSON_SCHEMA - "1" => `--help` output advertises
 //                                         `--json-schema`; anything else => not.
 //   CLAUDECODE_MCP_FAKE_MODE            - one of:
@@ -47,6 +52,23 @@ const outfile = process.env.CLAUDECODE_MCP_FAKE_OUTFILE;
 if (outfile) {
   try {
     writeFileSync(outfile, JSON.stringify(argv));
+  } catch {
+    // best-effort
+  }
+}
+
+// H1: When requested, drain stdin to EOF and persist it so tests can assert
+// that prompts above the argv size threshold are delivered via stdin rather
+// than as a single argv element (which would E2BIG on Linux).
+const stdinOutfile = process.env.CLAUDECODE_MCP_FAKE_STDIN_OUTFILE;
+if (stdinOutfile) {
+  let stdinData = "";
+  process.stdin.setEncoding("utf8");
+  for await (const chunk of process.stdin) {
+    stdinData += chunk;
+  }
+  try {
+    writeFileSync(stdinOutfile, stdinData);
   } catch {
     // best-effort
   }

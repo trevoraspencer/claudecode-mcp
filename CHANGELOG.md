@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Prompts larger than 100 KiB (including composites built from context files)
+  are now delivered to the `claude` CLI via stdin instead of a single argv
+  element. Previously any prompt over Linux's 128 KiB per-argument limit
+  (`MAX_ARG_STRLEN`) failed at spawn with a raw `E2BIG`, making the documented
+  5 MB per-file context capacity unusable. In `--print` mode the CLI reads the
+  prompt from stdin when no positional argument is given, so behavior is
+  otherwise unchanged; prompts at or under 100 KiB still travel on argv.
+
 ### Documentation
 - Added `AGENTS.md` as the canonical public guide for AI agents, and reduced
   `CLAUDE.md` and `GEMINI.md` to compatibility pointers.

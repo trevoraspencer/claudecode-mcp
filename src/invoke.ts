@@ -378,6 +378,16 @@ export function invokeCli(
       finish(() => resolve({ stdout, stderr, exitCode: code, durationMs: duration_ms }));
     });
 
+    // CORR-002/H1: Swallow stdin stream errors (EPIPE / write-after-end).
+    // The child may exit or close its stdin before consuming the buffered
+    // payload — with large stdin payloads (H1: prompts above the argv size
+    // limit) the write only completes as the child drains the pipe, so an
+    // early child exit surfaces as an `error` event here. Without a listener
+    // that event would crash the process. The subprocess result is determined
+    // by stdout/stderr/exitCode, not stdin delivery.
+    child.stdin.on("error", (err) => {
+      debugLog({ phase: "stdin_stream_error", error: err.message });
+    });
     if (opts.stdin !== undefined) {
       child.stdin.write(opts.stdin, (err) => {
         // CORR-002: Ignore EPIPE / write-after-end errors. The child may
