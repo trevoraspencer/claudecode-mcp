@@ -15,6 +15,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   5 MB per-file context capacity unusable. In `--print` mode the CLI reads the
   prompt from stdin when no positional argument is given, so behavior is
   otherwise unchanged; prompts at or under 100 KiB still travel on argv.
+- Prompts that travel on argv are now preceded by a `--` end-of-options
+  separator (in the server and in `skill.sh`), so a prompt beginning with `-`
+  (e.g. `--continue`, or any composite prompt — composites start with a
+  `----- context/file -----` fence) can no longer be parsed by the CLI as a
+  flag, which could silently defeat the no-session-persistence guarantee.
+- `skill.sh` now passes `--strict-mcp-config --mcp-config '{"mcpServers":{}}'`
+  like the MCP server does, closing the recursion footgun the README warns
+  about (the wrapper previously loaded the user's own MCP servers).
+- The `claude_prompt_structured` "no structured_output" error summary now
+  redacts secrets before truncating to 200 chars; previously a secret cut at
+  the boundary escaped the env-value redaction and its prefix leaked.
+- Fence-like lines inside included file bodies are neutralized for runs of
+  5-or-more hyphens (previously exactly 5), matching the path escaping, so a
+  `------ end file -----` content line can no longer read as a terminator.
+- The in-flight `--json-schema` probe is now keyed by binary path like its
+  cache, so changing `CLAUDECODE_MCP_CLAUDE_BIN` mid-probe cannot return the
+  old binary's answer.
+- CI and release `npm audit` steps are now actually non-blocking
+  (`continue-on-error`), as this changelog documented; a new advisory in a
+  transitive dependency surfaces as a step warning instead of failing every
+  unrelated PR and blocking releases.
+- `claude_prompt_structured`'s tool description no longer denies the `items`
+  validation the sanity check performs (it recurses into array `items`
+  schemas; enum/min/max/pattern remain unchecked).
+
+### Security
+- GitHub Actions are pinned to exact commit SHAs (checkout v4.3.1,
+  setup-node v4.4.0, upload-artifact v4.6.2) instead of mutable `v4` tags.
 
 ### Documentation
 - Added `AGENTS.md` as the canonical public guide for AI agents, and reduced
