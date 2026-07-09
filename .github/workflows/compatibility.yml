@@ -1,18 +1,13 @@
-name: CI
+name: Compatibility
 
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+  workflow_dispatch:
 
-# SEC-008: Explicit permissions block — read-only for CI.
 permissions:
   contents: read
 
-# DX-007: Cancel superseded runs for the same branch/PR.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -52,17 +47,4 @@ jobs:
 
       - name: Test (offline)
         run: npm test
-        timeout-minutes: 5
-
-      # L6: Non-blocking by design (see CHANGELOG 1.0.1: "surface new
-      # HIGH-severity advisories") — a new advisory in a transitive dep
-      # should warn, not fail every unrelated PR.
-      - name: Audit production dependencies (high+)
-        run: npm audit --omit=dev --audit-level=high
-        continue-on-error: true
-        timeout-minutes: 5
-
-      - name: Audit all dependencies (high+)
-        run: npm audit --audit-level=high
-        continue-on-error: true
         timeout-minutes: 5
