@@ -33,8 +33,8 @@ node --test --test-name-pattern='<regex>' test/<file>.test.mjs
 
 ## CI expectations
 
-GitHub Actions validates pushes and pull requests on Node 20 and 22. The CI
-workflow runs:
+GitHub Actions validates pushes and pull requests on current Node/Linux. The
+required CI workflow runs:
 
 - `npm ci`
 - `npm run format:check`
@@ -44,7 +44,8 @@ workflow runs:
 - `npm audit --omit=dev --audit-level=high`
 - `npm audit --audit-level=high`
 
-Release validation follows the same checks and also runs `npm pack --dry-run`.
+Manual compatibility coverage exercises Node 20 and 22. Release validation
+follows the required checks and also runs `npm pack --dry-run`.
 
 ## Architecture map
 

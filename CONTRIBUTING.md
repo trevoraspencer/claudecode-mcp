@@ -46,8 +46,9 @@ node --test --test-name-pattern='<regex>' test/<file>.test.mjs
 - Open an issue first for anything beyond a small bug fix or doc tweak — it's
   cheaper to align on direction than to redo a PR.
 - Keep changes focused. One concern per PR.
-- Run `npm run build && npm test` locally before pushing; CI runs the same
-  commands on Node 20 and 22.
+- Run `npm run build && npm test` locally before pushing; required CI runs the
+  same commands on current Node/Linux, with Node 20/22 coverage in the manual
+  compatibility workflow.
 - Update `CHANGELOG.md` under an `## [Unreleased]` heading.
 - Do not add runtime dependencies beyond `@modelcontextprotocol/sdk` without
   prior discussion. Devtime additions should be justified.

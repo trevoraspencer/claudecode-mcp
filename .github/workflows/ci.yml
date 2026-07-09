@@ -17,36 +17,38 @@ concurrency:
 
 jobs:
   build-and-test:
-    name: Node ${{ matrix.node }} on ubuntu-latest
+    name: Node 22 on ubuntu-latest
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        node: ['20', '22']
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
-      - name: Set up Node.js ${{ matrix.node }}
+      - name: Set up Node.js 22
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: ${{ matrix.node }}
+          node-version: "22"
           cache: npm
 
       - name: Install dependencies
         run: npm ci
+        timeout-minutes: 5
 
       - name: Check formatting
         run: npm run format:check
+        timeout-minutes: 5
 
       - name: Typecheck
         run: npx tsc --noEmit -p tsconfig.json
+        timeout-minutes: 5
 
       - name: Build
         run: npm run build
+        timeout-minutes: 5
 
       - name: Test (offline)
         run: npm test
+        timeout-minutes: 5
 
       # L6: Non-blocking by design (see CHANGELOG 1.0.1: "surface new
       # HIGH-severity advisories") — a new advisory in a transitive dep
@@ -54,7 +56,9 @@ jobs:
       - name: Audit production dependencies (high+)
         run: npm audit --omit=dev --audit-level=high
         continue-on-error: true
+        timeout-minutes: 5
 
       - name: Audit all dependencies (high+)
         run: npm audit --audit-level=high
         continue-on-error: true
+        timeout-minutes: 5
