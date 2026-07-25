@@ -1,0 +1,20 @@
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "tools/call",
+  "params": {
+    "name": "claude_prompt_structured",
+    "arguments": {
+      "prompt": "Return JSON describing a fictional book with a 'title' and 'author' field.",
+      "model": "haiku",
+      "schema": {
+        "type": "object",
+        "required": ["title", "author"],
+        "properties": {
+          "title": { "type": "string" },
+          "author": { "type": "string" }
+        }
+      }
+    }
+  }
+}

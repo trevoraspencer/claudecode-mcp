@@ -1,0 +1,62 @@
+{
+  "name": "claudecode-mcp",
+  "version": "1.0.1",
+  "description": "Stateless MCP server wrapping Claude Code CLI headlessly.",
+  "license": "MIT",
+  "author": "Trevor Spencer",
+  "homepage": "https://github.com/trevoraspencer/claudecode-mcp#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/trevoraspencer/claudecode-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/trevoraspencer/claudecode-mcp/issues"
+  },
+  "keywords": [
+    "mcp",
+    "claude",
+    "claude-code",
+    "anthropic",
+    "stdio",
+    "ai",
+    "cli",
+    "model-context-protocol"
+  ],
+  "type": "module",
+  "bin": {
+    "claudecode-mcp": "dist/server.js"
+  },
+  "main": "dist/server.js",
+  "files": [
+    "dist",
+    "examples",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "exports": {
+    ".": "./dist/server.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node -e \"require('fs').chmodSync('dist/server.js', 0o755)\"",
+    "start": "node dist/server.js",
+    "pretest": "npm run build",
+    "test": "node --test test/*.test.mjs",
+    "test:live": "CLAUDECODE_MCP_LIVE=1 node --test test/*.test.mjs",
+    "format": "prettier --write 'src/**/*.ts' 'test/**/*.mjs'",
+    "format:check": "prettier --check 'src/**/*.ts' 'test/**/*.mjs'",
+    "prepack": "npm run build",
+    "prepublishOnly": "npm run build && node -e \"require('fs').statSync('dist/server.js')\" && npm test"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "prettier": "^3.8.3",
+    "typescript": "^5.5.0"
+  }
+}
