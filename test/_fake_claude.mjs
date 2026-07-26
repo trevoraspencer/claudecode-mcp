@@ -41,6 +41,10 @@ import { writeFileSync, writeSync } from "node:fs";
 const argv = process.argv.slice(2);
 
 if (argv.includes("--help")) {
+  const delayMs = Number(process.env.CLAUDECODE_MCP_FAKE_HELP_DELAY_MS ?? "0");
+  if (Number.isFinite(delayMs) && delayMs > 0) {
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
   const adv = process.env.CLAUDECODE_MCP_FAKE_HAS_JSON_SCHEMA === "1";
   let help = "Usage: claude [options] [prompt]\n";
   help += "  --print\n  --permission-mode <mode>\n  --no-session-persistence\n";
@@ -84,6 +88,9 @@ switch (mode) {
     process.exit(1);
   case "malformed_json":
     process.stdout.write("zzz this is not json output\nneither is this\n");
+    process.exit(0);
+  case "malformed_secret":
+    process.stdout.write(process.env.CLAUDECODE_MCP_FAKE_RESULT_TEXT ?? "not-json");
     process.exit(0);
   case "missing_structured":
     process.stdout.write(

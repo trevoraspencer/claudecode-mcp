@@ -8,6 +8,7 @@ import {
   validateInputWithContext,
   validateInputStructured,
   validateAgainstSchema,
+  serializeSchemaForCli,
 } from "../dist/server.js";
 
 // ----- claude_prompt -----
@@ -47,6 +48,31 @@ test("validateInput accepts a well-formed payload", () => {
   assert.equal(out.prompt, "hi");
   assert.equal(out.model, "haiku");
   assert.equal(out.system_prompt, "be terse");
+});
+
+test("runtime validators enforce the advertised additionalProperties: false contract", () => {
+  assert.throws(() => validateInput({ prompt: "p", typo: true }), /unknown argument: typo/);
+  assert.throws(
+    () => validateInputWithContext({ prompt: "p", files: [], working_dir: "/tmp" }),
+    /unknown argument: working_dir/,
+  );
+  assert.throws(
+    () => validateInputStructured({ prompt: "p", schema: {}, session_id: "resume-me" }),
+    /unknown argument: session_id/,
+  );
+});
+
+test("validateInput rejects unsafe or unbounded argv-backed options", () => {
+  assert.throws(() => validateInput({ prompt: "p", model: "--resume" }), /begins with '-'/);
+  assert.throws(() => validateInput({ prompt: "p", model: "bad model" }), /whitespace/);
+  assert.throws(
+    () => validateInput({ prompt: "p", system_prompt: "x".repeat(100 * 1024 + 1) }),
+    /system_prompt.*exceeds/,
+  );
+  assert.throws(
+    () => validateInput({ prompt: "p", system_prompt: "contains\0nul" }),
+    /must not contain NUL/,
+  );
 });
 
 // ----- claude_prompt_with_context -----
@@ -90,6 +116,31 @@ test("validateInputWithContext accepts a well-formed payload", () => {
   assert.deepEqual(out.files, ["a.txt", "b.txt"]);
 });
 
+test("validateInputWithContext bounds the number of files", () => {
+  assert.throws(
+    () =>
+      validateInputWithContext({
+        prompt: "p",
+        files: Array.from({ length: 33 }, (_, i) => `file-${i}.txt`),
+      }),
+    /at most 32 paths/,
+  );
+});
+
+test("file-count bounds run before inspecting elements of an oversized list", () => {
+  const files = Array(33).fill("unused.txt");
+  let inspected = false;
+  Object.defineProperty(files, 0, {
+    enumerable: true,
+    get() {
+      inspected = true;
+      return "surprise.txt";
+    },
+  });
+  assert.throws(() => validateInputWithContext({ prompt: "p", files }), /at most 32 paths/);
+  assert.equal(inspected, false);
+});
+
 // ----- claude_prompt_structured -----
 
 test("validateInputStructured rejects non-object schema", () => {
@@ -119,6 +170,62 @@ test("validateInputStructured still enforces base validation (missing prompt)", 
   );
 });
 
+test("structured schema preflight rejects oversized, deep, cyclic, and non-JSON data", () => {
+  assert.throws(
+    () =>
+      validateInputStructured({
+        prompt: "p",
+        schema: { description: "x".repeat(100 * 1024) },
+      }),
+    /schema.*exceeds.*serialized/,
+  );
+
+  let deep = { type: "string" };
+  for (let i = 0; i < 66; i++) deep = { items: deep };
+  assert.throws(() => serializeSchemaForCli(deep), /maximum depth 64/);
+
+  const cyclic = {};
+  cyclic.self = cyclic;
+  assert.throws(() => serializeSchemaForCli(cyclic), /cyclic/);
+  assert.throws(() => serializeSchemaForCli({ minimum: Infinity }), /finite JSON numbers/);
+  assert.throws(() => serializeSchemaForCli({ default: new Date() }), /plain JSON objects/);
+});
+
+test("schema node bounds apply during discovery of very wide objects", () => {
+  const properties = {};
+  let gettersRead = 0;
+  for (let i = 0; i < 10_001; i++) {
+    Object.defineProperty(properties, `field_${i}`, {
+      enumerable: true,
+      get() {
+        gettersRead++;
+        return { type: "string" };
+      },
+    });
+  }
+  assert.throws(
+    () => serializeSchemaForCli({ type: "object", properties }),
+    /exceeds 10000 JSON nodes/,
+  );
+  assert.ok(gettersRead < 10_001, "discovery must stop before eagerly reading every property");
+});
+
+test("schema text bounds reject huge strings before JSON serialization", () => {
+  const huge = "x".repeat(2 * 1024 * 1024);
+  const originalStringify = JSON.stringify;
+  let stringifyCalled = false;
+  JSON.stringify = (...args) => {
+    stringifyCalled = true;
+    return originalStringify(...args);
+  };
+  try {
+    assert.throws(() => serializeSchemaForCli({ description: huge }), /serialized UTF-8 bytes/);
+    assert.equal(stringifyCalled, false);
+  } finally {
+    JSON.stringify = originalStringify;
+  }
+});
+
 // ----- validateAgainstSchema -----
 
 test("validateAgainstSchema enforces top-level type", () => {
@@ -134,4 +241,32 @@ test("validateAgainstSchema enforces per-property type", () => {
   };
   assert.throws(() => validateAgainstSchema({ age: "old" }, schema), /expected type 'integer'/);
   assert.doesNotThrow(() => validateAgainstSchema({ age: 30 }, schema));
+});
+
+test("validateAgainstSchema supports JSON Schema union type arrays", () => {
+  const nullableString = { type: ["string", "null"] };
+  assert.doesNotThrow(() => validateAgainstSchema("hello", nullableString));
+  assert.doesNotThrow(() => validateAgainstSchema(null, nullableString));
+  assert.throws(() => validateAgainstSchema(42, nullableString), /string \| null/);
+
+  const objectUnion = {
+    type: ["object", "null"],
+    required: ["name"],
+    properties: { name: { type: "string" } },
+  };
+  assert.throws(() => validateAgainstSchema({}, objectUnion), /missing required field 'name'/);
+  assert.throws(() => validateAgainstSchema({ name: 3 }, objectUnion), /expected type 'string'/);
+});
+
+test("validateAgainstSchema required/properties checks ignore inherited fields", () => {
+  assert.throws(
+    () => validateAgainstSchema({}, { type: "object", required: ["toString"] }),
+    /missing required field 'toString'/,
+  );
+  assert.doesNotThrow(() =>
+    validateAgainstSchema(
+      { toString: "own" },
+      { type: "object", required: ["toString"], properties: { toString: { type: "string" } } },
+    ),
+  );
 });

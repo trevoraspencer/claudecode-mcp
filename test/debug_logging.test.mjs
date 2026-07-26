@@ -125,8 +125,8 @@ test("DEBUG logs contain correctly-typed structured fields (duration_ms, exit_co
   }
 });
 
-// OBS-011: stderr-content diagnostic logging — when CLI exits non-zero with
-// stderr content, the stderr snippet should be logged via debugLog.
+// OBS-011: stderr diagnostics — the bounded preview emitted after a non-zero
+// exit must be sanitized before debugLog receives it.
 test("non-zero exit logs stderr snippet via structured debugLog", async () => {
   process.env.DEBUG = "claudecode-mcp";
   process.env.CLAUDECODE_MCP_FAKE_MODE = "leak_secret";

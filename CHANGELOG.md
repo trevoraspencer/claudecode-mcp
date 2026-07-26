@@ -8,13 +8,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+
+- MCP request cancellation now reaches the active Claude subprocess instead of
+  leaving it running until the ten-minute timeout. Timeout, cancellation, and
+  output-limit cleanup terminate the complete POSIX process group (including
+  descendants), with the existing `SIGTERM`/`SIGKILL` grace sequence.
+  Cancellation also reaches the shared `--json-schema` flag probe without
+  interrupting other callers that are still waiting on that probe.
+- Context-file inclusion is bounded to 32 sequential reads and a 20 MiB
+  aggregate context cap, preventing unbounded file-descriptor fan-out and
+  memory retention. Opened files are rechecked through their file descriptors
+  on Linux to close parent-component symlink-swap races; other platforms
+  perform post-open canonical-containment and inode checks.
+- `system_prompt`, model identifiers, and serialized JSON schemas now receive
+  explicit argv-safe size/shape bounds. Schema preflight also rejects cycles,
+  excessive depth/node counts, and lossy non-JSON values before launching the
+  CLI; discovery is bounded too, so a very wide object cannot first allocate
+  an oversized traversal queue.
+- Resource-limit environment variables now accept only bounded positive safe
+  integers; oversized Node timer values can no longer be silently clamped to a
+  one-millisecond timeout.
+- Importing the package from an unrelated script named `server.js` no longer
+  starts the MCP transport; entrypoint detection compares canonical paths and
+  still supports npm's symlinked executable.
+- The filtered child-environment cache now keys on an exact deterministic
+  snapshot rather than a collision-prone 32-bit hash.
+- Loose JSON recovery now prefers Claude response objects over valid
+  JSON-looking diagnostics, selects the longest generic candidate, and bounds
+  candidate count/nesting so malformed output cannot amplify memory or CPU.
+- The lightweight post-hoc schema check now supports JSON Schema union `type`
+  arrays (including nullable objects/arrays) instead of rejecting output the
+  Claude CLI had already validated successfully.
+- Runtime tool validators now reject unknown arguments as advertised by each
+  tool's `additionalProperties: false` schema, preventing misspelled or
+  forbidden fields from being silently ignored.
+- `skill.sh` now mirrors the server's curated child environment, strips
+  dangerous ambient CLI controls, handles option-like directory names safely,
+  supports bare mode and large prompts through `./skill.sh -` stdin mode, and
+  handles empty arrays safely on Bash 3.2.
 - Prompts larger than 100 KiB (including composites built from context files)
   are now delivered to the `claude` CLI via stdin instead of a single argv
   element. Previously any prompt over Linux's 128 KiB per-argument limit
   (`MAX_ARG_STRLEN`) failed at spawn with a raw `E2BIG`, making the documented
   5 MB per-file context capacity unusable. In `--print` mode the CLI reads the
   prompt from stdin when no positional argument is given, so behavior is
-  otherwise unchanged; prompts at or under 100 KiB still travel on argv.
+  otherwise unchanged; prompts at or under 100 KiB still travel on argv when
+  the platform permits. Windows routing now also checks the complete quoted
+  command line against the 32,767 UTF-16-unit CreateProcess limit, and
+  oversized non-prompt combinations fail cleanly before spawn.
 - Prompts that travel on argv are now preceded by a `--` end-of-options
   separator (in the server and in `skill.sh`), so a prompt beginning with `-`
   (e.g. `--continue`, or any composite prompt — composites start with a
@@ -32,25 +73,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The in-flight `--json-schema` probe is now keyed by binary path like its
   cache, so changing `CLAUDECODE_MCP_CLAUDE_BIN` mid-probe cannot return the
   old binary's answer.
-- CI and release `npm audit` steps are now actually non-blocking
-  (`continue-on-error`), as this changelog documented; a new advisory in a
-  transitive dependency surfaces as a step warning instead of failing every
-  unrelated PR and blocking releases.
+- CI and release now block on HIGH-severity production dependency advisories.
+  The broader all-dependency audit remains non-blocking so an unrelated
+  development-tool transitive advisory is still visible without freezing
+  every source change.
 - `claude_prompt_structured`'s tool description no longer denies the `items`
   validation the sanity check performs (it recurses into array `items`
   schemas; enum/min/max/pattern remain unchecked).
 
 ### Security
+
+- Bearer-token redaction now covers case variants and the complete common token
+  alphabet. TLS key passphrases, explicitly forwarded environment values, and
+  dangerous request/header overrides are also scrubbed, and debug logs no
+  longer emit raw subprocess stderr. Client sanitization examines only a
+  bounded prefix while still detecting exact secrets that cross its output
+  boundary or begin before a whitespace-skipping offset, avoiding both secret
+  prefix leaks and large-error memory amplification.
+- The curated child environment now retains documented Bedrock, Vertex,
+  Foundry, Claude Platform on AWS, standard cloud credentials, and required
+  Windows runtime/config-location variables. The explicit dangerous-variable
+  override works by itself as documented.
+- Updated vulnerable transitive HTTP/parser dependencies and forced
+  `@hono/node-server` to the patched 2.x line.
+- Checkout steps no longer persist the workflow token in local Git
+  configuration during untrusted build/test execution.
 - GitHub Actions are pinned to exact commit SHAs (checkout v4.3.1,
   setup-node v4.4.0, upload-artifact v4.6.2) instead of mutable `v4` tags.
+- The manual Node 20/22 compatibility matrix now runs on macOS as well as
+  Ubuntu, covering the portable path-validation and system Bash 3.2 branches.
 
 ### Documentation
+
 - Added `AGENTS.md` as the canonical public guide for AI agents, and reduced
   `CLAUDE.md` and `GEMINI.md` to compatibility pointers.
 
 ## [1.0.1] - 2026-05-12
 
 ### Security
+
 - Strip dangerous parent-env vars from the child subprocess by default
   (`CLAUDE_CODE_SHELL_PREFIX`, `CLAUDE_CODE_EXTRA_BODY`,
   `ANTHROPIC_CUSTOM_HEADERS`, `CLAUDE_CODE_SCRIPT_CAPS`, `CLAUDECODE`).
@@ -74,6 +135,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   auth env vars. Full text is logged to local stderr for server-side debug.
 
 ### Added
+
 - Per-call subprocess timeout, default 10 min, override with
   `CLAUDECODE_MCP_TIMEOUT_MS`. Stuck processes are killed with `SIGTERM` then
   `SIGKILL` after a 2s grace.
@@ -101,6 +163,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to surface new HIGH-severity advisories in production deps.
 
 ### Documentation
+
 - Documented recommended minimum `claude` CLI version (2.1.0+) given the
   brief `--no-session-persistence` regression in 2.0.57.
 - README "Design notes" rewritten with timeout, output cap, env allowlist,
@@ -108,6 +171,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CLAUDE.md (project instructions) updated with the new invariants.
 
 ### Changed
+
 - `runClaudePrompt` no longer silently returns raw stdout when JSON parsing
   fails. It now throws a clear "output was not parseable JSON" error.
 - `parseJsonLoose`'s last-resort fallback is now a balanced-bracket scan
@@ -121,6 +185,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.0.0] - 2026-05-12
 
 ### Added
+
 - Initial public release of `claudecode-mcp`, a stateless stdio MCP server
   wrapping the headless `claude` CLI as three MCP tools:
   - `claude_prompt` — one-shot text prompt; returns the model's text response.

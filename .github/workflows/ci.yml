@@ -27,6 +27,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
 
       - name: Set up Node.js ${{ matrix.node }}
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -54,14 +56,13 @@ jobs:
         run: npm test
         timeout-minutes: 5
 
-      # L6: Non-blocking by design (see CHANGELOG 1.0.1: "surface new
-      # HIGH-severity advisories") — a new advisory in a transitive dep
-      # should warn, not fail every unrelated PR.
+      # Production HIGH-severity advisories are a release boundary.
       - name: Audit production dependencies (high+)
         run: npm audit --omit=dev --audit-level=high
-        continue-on-error: true
         timeout-minutes: 5
 
+      # Development-only transitive advisories remain visible without making
+      # every source change depend on unrelated toolchain releases.
       - name: Audit all dependencies (high+)
         run: npm audit --audit-level=high
         continue-on-error: true

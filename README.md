@@ -43,6 +43,7 @@ node dist/server.js
 ## Register
 
 Claude Code (`~/.claude/mcp.json`):
+
 ```json
 {
   "mcpServers": {
@@ -77,8 +78,11 @@ against `node dist/server.js`.
 ## skill.sh
 
 `skill.sh` is a minimal shell wrapper for direct CLI invocation outside MCP.
-Usage: `./skill.sh "<prompt>" [working_dir]`. It runs `claude --print` with
-the same flags the MCP server uses. Not installed with the npm package.
+Usage: `./skill.sh "<prompt>" [working_dir]`, or pipe a large prompt to
+`./skill.sh - [working_dir]`. It runs `claude --print` with the same flags and
+curated child environment the MCP server uses, including
+`CLAUDECODE_MCP_BARE=1` opt-in. Not installed with the npm package. The script
+remains compatible with the Bash 3.2 shipped by older macOS releases.
 
 ## Debug logging
 
@@ -95,6 +99,7 @@ DEBUG=claudecode-mcp claudecode-mcp
 ```
 npm run test:live
 ```
+
 Runs tiny real prompts against `claude`. Skipped unless `CLAUDECODE_MCP_LIVE=1`.
 
 ## Troubleshooting
@@ -110,6 +115,7 @@ export CLAUDECODE_MCP_CLAUDE_BIN=/usr/local/bin/claude
 ```
 
 Verify the binary works on its own first:
+
 ```sh
 "$CLAUDECODE_MCP_CLAUDE_BIN" --version
 ```
@@ -124,8 +130,9 @@ first:
   that launches the MCP server (your shell, your IDE, your launchd plist,
   etc.).
 
-`--bare` is intentionally not used — it would disable OAuth/keychain and
-force `ANTHROPIC_API_KEY`. That's a deliberate design decision, not a bug.
+`--bare` is intentionally off by default — it would disable OAuth/keychain and
+force `ANTHROPIC_API_KEY`. Set `CLAUDECODE_MCP_BARE=1` only when that tradeoff
+is intentional.
 
 **`claude_prompt_structured` errors with "does not support the --json-schema flag".**
 Your installed `claude` CLI predates `--json-schema`. Upgrade Claude Code
@@ -141,9 +148,13 @@ fall back to `claude_prompt`.
   `--print` mode the CLI reads the prompt from stdin when no positional is
   given). This stays under the OS per-argument size limit (Linux
   `MAX_ARG_STRLEN`, 128 KiB), so large contexts — up to the 5 MB per-file
-  cap — spawn successfully instead of failing with `E2BIG`. Prompts that do
-  travel on argv are preceded by a `--` end-of-options separator, so prompt
-  text beginning with `-` can never be parsed as CLI flags.
+  cap — spawn successfully instead of failing with `E2BIG`. On Windows, the
+  complete quoted command line is checked against the 32,767 UTF-16-unit
+  CreateProcess limit; prompts move to stdin as needed, and oversized
+  non-prompt combinations fail with a bounded application error before spawn.
+  Prompts that do travel on argv are preceded by a `--` end-of-options
+  separator, so prompt text beginning with `-` can never be parsed as CLI
+  flags.
 - `--bare` is opt-in via `CLAUDECODE_MCP_BARE=1`. Default keeps OAuth/keychain
   auth working, but pins `--strict-mcp-config --mcp-config '{"mcpServers":{}}'`
   so the wrapped subprocess does NOT load the user's own MCP servers (avoids
@@ -156,7 +167,12 @@ fall back to `claude_prompt`.
 
 - Default 10-minute per-call timeout. Override with `CLAUDECODE_MCP_TIMEOUT_MS=<ms>`.
   On timeout the subprocess is sent `SIGTERM` and then `SIGKILL` after a 2s
-  grace, and the tool call rejects with an `InvokeTimeoutError`.
+  grace, and the tool call rejects with an `InvokeTimeoutError`. On POSIX the
+  complete CLI process group is terminated, including descendants.
+- MCP request cancellation is propagated to the active CLI process (including
+  the shared `--json-schema` capability probe) and rejects with
+  `InvokeAbortedError`; it uses the same process-tree cleanup path. Cancelling
+  one caller does not interrupt a shared probe still needed by another caller.
 - Default 50 MB cap on combined stdout/stderr from a single call. Override with
   `CLAUDECODE_MCP_MAX_OUTPUT_BYTES=<bytes>`. On overflow the subprocess is
   killed and the call rejects with `OutputTooLargeError`. There is no silent
@@ -167,6 +183,9 @@ fall back to `claude_prompt`.
 - File paths must be **relative** to the server process's working directory.
   Absolute paths, `..` escapes, and symlinks pointing outside cwd are rejected.
 - Per-file size cap, default 5 MB. Override with `CLAUDECODE_MCP_MAX_FILE_BYTES=<bytes>`.
+- At most 32 files are accepted per request. Free-form context and included
+  file bodies also share a 20 MB aggregate cap; override it with
+  `CLAUDECODE_MCP_MAX_CONTEXT_BYTES=<bytes>`.
 - File contents and paths are inserted into the prompt inside `----- file: NAME -----`
   fenced blocks (not pseudo-XML), so quotes or angle brackets in paths cannot
   break the block boundaries.
@@ -181,8 +200,11 @@ full parent env. Pass-through includes:
 - Anthropic auth: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
   `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_OAUTH_REFRESH_TOKEN`,
   `CLAUDE_CODE_OAUTH_SCOPES`.
-- Cloud provider auth: `AWS_BEARER_TOKEN_BEDROCK`, `ANTHROPIC_AWS_*`,
-  `ANTHROPIC_FOUNDRY_API_KEY`, `ANTHROPIC_VERTEX_PROJECT_ID`.
+- Cloud provider routing/auth: the documented `CLAUDE_CODE_USE_*` and
+  `CLAUDE_CODE_SKIP_*_AUTH` selectors; standard AWS credential/region/profile
+  variables; `AWS_BEARER_TOKEN_BEDROCK`; `ANTHROPIC_AWS_*`;
+  Foundry API/bearer/resource variables and Azure service-principal variables;
+  and Vertex project/region/application-credentials variables.
 - Routing: `ANTHROPIC_BASE_URL`, `ANTHROPIC_*_BASE_URL`.
 - Model selection: `ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_*_MODEL`, `ANTHROPIC_BETAS`.
 - TLS: `CLAUDE_CODE_CERT_STORE`, `CLAUDE_CODE_CLIENT_CERT`, `CLAUDE_CODE_CLIENT_KEY`,
@@ -190,8 +212,11 @@ full parent env. Pass-through includes:
 - Locations: `CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_DEBUG_LOGS_DIR`.
 - Anything in `CLAUDECODE_MCP_EXTRA_ENV` (comma-separated key names).
 
-Always force-set: `NO_COLOR=1`, `TERM=dumb`. Always **stripped** (unless
-`CLAUDECODE_MCP_FORWARD_DANGEROUS=1`): `CLAUDE_CODE_SHELL_PREFIX`,
+Windows runtime/config-location variables such as `SystemRoot`, `PATHEXT`,
+`USERPROFILE`, and `APPDATA` are retained on Windows. Always force-set:
+`NO_COLOR=1`, `TERM=dumb`. Always **stripped** (unless the explicit
+`CLAUDECODE_MCP_FORWARD_DANGEROUS=1` opt-in is set):
+`CLAUDE_CODE_SHELL_PREFIX`,
 `CLAUDE_CODE_EXTRA_BODY`, `ANTHROPIC_CUSTOM_HEADERS`,
 `CLAUDE_CODE_SCRIPT_CAPS`, `CLAUDECODE`.
 
@@ -199,8 +224,9 @@ Always force-set: `NO_COLOR=1`, `TERM=dumb`. Always **stripped** (unless
 
 Errors returned to MCP clients are truncated (1 KB) and redact `sk-ant-*`
 tokens, `Bearer …` headers, and any verbatim copies of values held in known
-auth env vars. The full untruncated stderr is logged to the MCP server's local
-stderr for debugging.
+auth env vars or variables named in `CLAUDECODE_MCP_EXTRA_ENV`. Local
+diagnostics contain redacted, bounded previews and byte counts rather than raw
+CLI stderr.
 
 ## License
 

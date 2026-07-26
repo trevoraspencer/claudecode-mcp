@@ -50,10 +50,19 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, join, basename } from "node:path";
-import { invokeCli, parseJsonLoose, debugLog, errorLog } from "./invoke.js";
+import { dirname, join } from "node:path";
+import {
+  invokeCli,
+  parseJsonLoose,
+  debugEnabled,
+  debugLog,
+  errorLog,
+  InvokeAbortedError,
+  WINDOWS_COMMAND_LINE_MAX_UNITS,
+  windowsCommandLineLength,
+} from "./invoke.js";
 
 // Re-export all public symbols for backward compatibility with test imports
 export { debugEnabled, warnLog, errorLog } from "./invoke.js";
@@ -70,6 +79,7 @@ export {
   validateInputWithContext,
   validateInputStructured,
   validateAgainstSchema,
+  serializeSchemaForCli,
 } from "./validators.js";
 export type {
   ClaudePromptInput,
@@ -78,6 +88,7 @@ export type {
 } from "./validators.js";
 import { safeReadFileUnderCwd } from "./path-guard.js";
 import { realpath } from "node:fs/promises";
+import { numFromEnv } from "./env.js";
 import { exitError, sanitizeForClient, redactSecrets } from "./redaction.js";
 import { getClaudeBin, isJsonSchemaFlagAvailable } from "./flag-probe.js";
 import {
@@ -85,6 +96,8 @@ import {
   validateInputWithContext,
   validateInputStructured,
   validateAgainstSchema,
+  serializeSchemaForCli,
+  MAX_CONTEXT_FILES,
 } from "./validators.js";
 import type {
   ClaudePromptInput,
@@ -262,17 +275,43 @@ export const MAX_PROMPT_ARG_BYTES = 100 * 1024;
  * the prompt fits on argv and returns undefined; otherwise leaves `args`
  * untouched and returns the prompt to be passed as the subprocess's stdin.
  */
-export function routePromptDelivery(args: string[], prompt: string): string | undefined {
+export function routePromptDelivery(
+  args: string[],
+  prompt: string,
+  platform: NodeJS.Platform = process.platform,
+  command: string = getClaudeBin(),
+): string | undefined {
   const promptBytes = Buffer.byteLength(prompt, "utf8");
-  if (promptBytes <= MAX_PROMPT_ARG_BYTES) {
+  const fitsWindowsCommandLine =
+    platform !== "win32" ||
+    windowsCommandLineLength(command, [...args, "--", prompt]) + 1 <=
+      WINDOWS_COMMAND_LINE_MAX_UNITS;
+  // Node rejects NUL bytes in argv, while stdin can carry them safely.
+  if (promptBytes <= MAX_PROMPT_ARG_BYTES && !prompt.includes("\0") && fitsWindowsCommandLine) {
     args.push("--", prompt);
     return undefined;
   }
-  debugLog({ phase: "prompt_via_stdin", prompt_bytes: promptBytes });
+  debugLog({
+    phase: "prompt_via_stdin",
+    prompt_bytes: promptBytes,
+    reason: !fitsWindowsCommandLine
+      ? "windows_command_line_limit"
+      : prompt.includes("\0")
+        ? "nul"
+        : "argument_size",
+  });
   return prompt;
 }
 
 // ── Shared invocation helper (ARCH-004) ──────────────────────────────
+
+interface ExecutionOptions {
+  signal?: AbortSignal;
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new InvokeAbortedError();
+}
 
 /**
  * Invoke the claude CLI with the given args, check exit code, and parse
@@ -285,8 +324,13 @@ async function invokeClaudeAndParse(
   args: string[],
   parseErrorPrefix: string,
   stdin?: string,
+  options: ExecutionOptions = {},
 ): Promise<unknown> {
-  const result = await invokeCli(getClaudeBin(), args, { cwd: process.cwd(), stdin });
+  const result = await invokeCli(getClaudeBin(), args, {
+    cwd: process.cwd(),
+    stdin,
+    signal: options.signal,
+  });
 
   if (result.exitCode !== 0) {
     throw exitError(result.exitCode, result.stderr, result.stdout);
@@ -310,12 +354,17 @@ async function invokeClaudeAndParse(
  */
 export async function runClaudePromptStructured(
   input: ClaudePromptStructuredInput,
+  options: ExecutionOptions = {},
 ): Promise<unknown> {
+  throwIfAborted(options.signal);
+  validateInputStructured(input);
   if (!input.schema) {
     throw new Error("claude_prompt_structured requires a `schema` (JSON Schema) argument");
   }
+  const serializedSchema = serializeSchemaForCli(input.schema);
 
-  const flagOk = await isJsonSchemaFlagAvailable();
+  const flagOk = await isJsonSchemaFlagAvailable(options.signal);
+  throwIfAborted(options.signal);
   if (!flagOk) {
     throw new Error(
       "claude_prompt_structured: installed `claude` CLI does not support " +
@@ -324,7 +373,7 @@ export async function runClaudePromptStructured(
   }
 
   const args: string[] = baseClaudeArgs();
-  args.push("--json-schema", JSON.stringify(input.schema));
+  args.push("--json-schema", serializedSchema);
   if (input.model) {
     args.push("--model", input.model);
   }
@@ -334,7 +383,12 @@ export async function runClaudePromptStructured(
   // H1: Large prompts travel via stdin instead of argv to avoid E2BIG.
   const stdinPrompt = routePromptDelivery(args, input.prompt);
 
-  const rawParsed = await invokeClaudeAndParse(args, "claude_prompt_structured", stdinPrompt);
+  const rawParsed = await invokeClaudeAndParse(
+    args,
+    "claude_prompt_structured",
+    stdinPrompt,
+    options,
+  );
   if (!rawParsed || typeof rawParsed !== "object" || Array.isArray(rawParsed)) {
     throw new Error("claude CLI returned a non-object payload");
   }
@@ -356,6 +410,7 @@ export async function runClaudePromptStructured(
 }
 
 const FILE_BLOCK_FENCE = "----- file:";
+const DEFAULT_MAX_CONTEXT_BYTES = 20 * 1024 * 1024;
 
 export function escapePathForFence(p: string): string {
   let out = p.replace(/[\r\n]+/g, " ");
@@ -365,34 +420,42 @@ export function escapePathForFence(p: string): string {
   return out;
 }
 
-async function buildCompositePrompt(input: ClaudePromptWithContextInput): Promise<string> {
+async function buildCompositePrompt(
+  input: ClaudePromptWithContextInput,
+  options: ExecutionOptions = {},
+): Promise<string> {
+  throwIfAborted(options.signal);
   const blocks: string[] = [];
+  const maxContextBytes = numFromEnv("CLAUDECODE_MCP_MAX_CONTEXT_BYTES", DEFAULT_MAX_CONTEXT_BYTES);
+  let contextBytes = Buffer.byteLength(input.context ?? "", "utf8");
+  if (contextBytes > maxContextBytes) {
+    throw new Error(`context exceeds ${maxContextBytes} total UTF-8 bytes`);
+  }
   if (input.context && input.context.length > 0) {
     blocks.push(`----- context -----\n${input.context}\n----- end context -----`);
   }
   if (input.files && input.files.length > 0) {
+    if (input.files.length > MAX_CONTEXT_FILES) {
+      throw new Error(`\`files\` must contain at most ${MAX_CONTEXT_FILES} paths`);
+    }
     // PERF-003: Compute realpath(cwd) once per request instead of per file.
     const baseReal = await realpath(process.cwd());
-    // PERF-002: Resolve and read all files in parallel via Promise.all.
-    // Promise.all preserves input order, so blocks are assembled in the
-    // same order as the caller's file list.
-    const fileResults = await Promise.all(
-      input.files.map(async (path) => {
-        // SEC-004: Use safeReadFileUnderCwd for atomic fd-based validation +
-        // read, eliminating the TOCTOU race between path-guard stat() and
-        // readFile() that existed when these were separate steps.
-        let body: string;
-        try {
-          body = await safeReadFileUnderCwd(path, process.cwd(), baseReal);
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          throw new Error(`failed to include file ${path}: ${msg}`);
-        }
-        return { path, body };
-      }),
-    );
-    // Build blocks in original file order.
-    for (const { path, body } of fileResults) {
+    // Read sequentially: an untrusted list must not fan out into an
+    // unbounded number of simultaneous file descriptors or retain every
+    // full file body before enforcing the aggregate cap.
+    for (const path of input.files) {
+      throwIfAborted(options.signal);
+      let body: string;
+      try {
+        body = await safeReadFileUnderCwd(path, process.cwd(), baseReal);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        throw new Error(`failed to include file ${path}: ${msg}`);
+      }
+      contextBytes += Buffer.byteLength(body, "utf8");
+      if (contextBytes > maxContextBytes) {
+        throw new Error(`included context exceeds ${maxContextBytes} total UTF-8 bytes`);
+      }
       const safePath = escapePathForFence(path);
       // CORR-004: Replace sentinel-fence-like patterns in file contents so
       // they cannot break the block boundary markers. L3: match runs of 5+
@@ -410,20 +473,31 @@ async function buildCompositePrompt(input: ClaudePromptWithContextInput): Promis
 
 export async function runClaudePromptWithContext(
   input: ClaudePromptWithContextInput,
+  options: ExecutionOptions = {},
 ): Promise<string> {
-  const composite = await buildCompositePrompt(input);
-  return runClaudePrompt({
-    prompt: composite,
-    model: input.model,
-    system_prompt: input.system_prompt,
-  });
+  throwIfAborted(options.signal);
+  validateInputWithContext(input);
+  const composite = await buildCompositePrompt(input, options);
+  return runClaudePrompt(
+    {
+      prompt: composite,
+      model: input.model,
+      system_prompt: input.system_prompt,
+    },
+    options,
+  );
 }
 
 /**
  * @throws {Error} on CLI failure or parse failure.
  * (ARCH-008: handleCallTool catches these throws and converts to isError responses.)
  */
-export async function runClaudePrompt(input: ClaudePromptInput): Promise<string> {
+export async function runClaudePrompt(
+  input: ClaudePromptInput,
+  options: ExecutionOptions = {},
+): Promise<string> {
+  throwIfAborted(options.signal);
+  validateInput(input);
   const args: string[] = baseClaudeArgs();
   if (input.model) {
     args.push("--model", input.model);
@@ -439,6 +513,7 @@ export async function runClaudePrompt(input: ClaudePromptInput): Promise<string>
     args,
     "claude CLI output was not parseable JSON (--output-format json expected)",
     stdinPrompt,
+    options,
   );
   if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
     const obj = parsed as Record<string, unknown>;
@@ -484,37 +559,42 @@ export function listTools(): {
  * converts them to `{isError: true}` MCP tool-call responses. Internal
  * functions throw; this boundary catches and wraps.
  */
-export async function handleCallTool(req: {
-  params: { name: string; arguments?: unknown };
-}): Promise<{
+export async function handleCallTool(
+  req: {
+    params: { name: string; arguments?: unknown };
+  },
+  options: ExecutionOptions = {},
+): Promise<{
   content: { type: "text"; text: string }[];
   isError?: boolean;
 }> {
   const start = Date.now();
   const tool = req.params.name;
   const args = req.params.arguments;
-  const inputBytes =
-    args === undefined || args === null ? 0 : Buffer.byteLength(JSON.stringify(args), "utf8");
-  debugLog({ phase: "call", tool, input_bytes: inputBytes });
-  // SEC-007: Warn on very large inputs (non-breaking observability only;
-  // no rejection to preserve backward compatibility). Documented threshold
-  // for operational visibility.
-  if (inputBytes > 1_000_000) {
-    debugLog({ phase: "large_input", tool, input_bytes: inputBytes, threshold: 1_000_000 });
-  }
   try {
+    // Computing an exact size JSON-serializes the complete request. Only pay
+    // that memory/CPU cost when the corresponding diagnostics are enabled.
+    if (debugEnabled()) {
+      const inputBytes =
+        args === undefined || args === null ? 0 : Buffer.byteLength(JSON.stringify(args), "utf8");
+      debugLog({ phase: "call", tool, input_bytes: inputBytes });
+      if (inputBytes > 1_000_000) {
+        debugLog({ phase: "large_input", tool, input_bytes: inputBytes, threshold: 1_000_000 });
+      }
+    }
+    throwIfAborted(options.signal);
     let result;
     if (tool === CLAUDE_PROMPT_TOOL.name) {
       const input = validateInput(args);
-      const text = await runClaudePrompt(input);
+      const text = await runClaudePrompt(input, options);
       result = { content: [{ type: "text" as const, text }] };
     } else if (tool === CLAUDE_PROMPT_WITH_CONTEXT_TOOL.name) {
       const input = validateInputWithContext(args);
-      const text = await runClaudePromptWithContext(input);
+      const text = await runClaudePromptWithContext(input, options);
       result = { content: [{ type: "text" as const, text }] };
     } else if (tool === CLAUDE_PROMPT_STRUCTURED_TOOL.name) {
       const input = validateInputStructured(args);
-      const json = await runClaudePromptStructured(input);
+      const json = await runClaudePromptStructured(input, options);
       result = {
         content: [{ type: "text" as const, text: JSON.stringify(json) }],
       };
@@ -534,13 +614,14 @@ export async function handleCallTool(req: {
     return result;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
+    const safeMessage = sanitizeForClient(message);
     // OBS-002: Log error class and relevant properties for diagnosability.
     const errorInfo: Record<string, unknown> = {
       phase: "call_done",
       tool,
       duration_ms: Date.now() - start,
       error_class: err instanceof Error ? err.constructor.name : typeof err,
-      error: message.slice(0, 200),
+      error: safeMessage.slice(0, 200),
     };
     if (err instanceof Error && "timeoutMs" in err) {
       errorInfo.timeout_ms = (err as { timeoutMs: number }).timeoutMs;
@@ -551,7 +632,7 @@ export async function handleCallTool(req: {
     debugLog(errorInfo);
     return {
       isError: true,
-      content: [{ type: "text", text: message }],
+      content: [{ type: "text", text: safeMessage }],
     };
   }
 }
@@ -565,16 +646,29 @@ async function main(): Promise<void> {
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => listTools());
-  server.setRequestHandler(CallToolRequestSchema, async (req) => handleCallTool(req));
+  server.setRequestHandler(CallToolRequestSchema, async (req, extra) =>
+    handleCallTool(req, { signal: extra.signal }),
+  );
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
 
-// ARCH-007/CORR-005: Use path.basename for precise entry-point detection
-// instead of broad suffix matching (which could match test_server.js, etc.).
-const entry = process.argv[1] ?? "";
-if (basename(entry) === "server.js" || basename(entry) === "server.ts") {
+/**
+ * Compare canonical paths so importing this package from an unrelated script
+ * named `server.js` cannot accidentally start an MCP transport. realpath also
+ * preserves direct execution through npm's symlinked `.bin` entry.
+ */
+export function isMainModule(entry: string | undefined = process.argv[1]): boolean {
+  if (!entry) return false;
+  try {
+    return realpathSync(entry) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (isMainModule()) {
   main().catch((err) => {
     // OBS-012: Format fatal startup error as structured JSON line for
     // consistent stderr output, then exit. Apply redaction to avoid leaking
