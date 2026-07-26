@@ -22,7 +22,7 @@ process.env.CLAUDECODE_MCP_FAKE_OUTFILE = join(TMP, "argv.json");
 process.env.CLAUDECODE_MCP_FAKE_HAS_JSON_SCHEMA = "1";
 process.env.CLAUDECODE_MCP_FAKE_MODE = "ok";
 
-const { listTools, handleCallTool } = await import("../dist/server.js");
+const { listTools, handleCallTool, resetFlagCache } = await import("../dist/server.js");
 
 test("listTools returns all three tool definitions", () => {
   const result = listTools();
@@ -81,6 +81,96 @@ test("handleCallTool: invalid arguments yield isError, never throw", async () =>
   assert.equal(res.isError, true);
   assert.match(res.content[0].text, /`prompt` must be a non-empty string/);
 });
+
+test(
+  "handleCallTool propagates request cancellation to the active CLI process",
+  async () => {
+    process.env.CLAUDECODE_MCP_FAKE_MODE = "hang";
+    const controller = new AbortController();
+    try {
+      const pending = handleCallTool(
+        {
+          params: { name: "claude_prompt", arguments: { prompt: "cancel me" } },
+        },
+        { signal: controller.signal },
+      );
+      setTimeout(() => controller.abort(), 100);
+      const res = await pending;
+      assert.equal(res.isError, true);
+      assert.match(res.content[0].text, /cancelled/);
+    } finally {
+      process.env.CLAUDECODE_MCP_FAKE_MODE = "ok";
+    }
+  },
+  { timeout: 10000 },
+);
+
+test(
+  "structured-call cancellation interrupts the shared --json-schema flag probe",
+  async () => {
+    resetFlagCache();
+    process.env.CLAUDECODE_MCP_FAKE_HELP_DELAY_MS = "5000";
+    const controller = new AbortController();
+    const started = Date.now();
+    try {
+      const pending = handleCallTool(
+        {
+          params: {
+            name: "claude_prompt_structured",
+            arguments: { prompt: "cancel probe", schema: { type: "object" } },
+          },
+        },
+        { signal: controller.signal },
+      );
+      setTimeout(() => controller.abort(), 100);
+      const res = await pending;
+      assert.equal(res.isError, true);
+      assert.match(res.content[0].text, /cancelled/);
+      assert.ok(Date.now() - started < 3000, "cancelled probe must not run to its 5s delay");
+    } finally {
+      delete process.env.CLAUDECODE_MCP_FAKE_HELP_DELAY_MS;
+      resetFlagCache();
+    }
+  },
+  { timeout: 10000 },
+);
+
+test(
+  "cancelling one structured caller does not abort a shared probe still in use",
+  async () => {
+    resetFlagCache();
+    process.env.CLAUDECODE_MCP_FAKE_HELP_DELAY_MS = "300";
+    const cancelled = new AbortController();
+    try {
+      const first = handleCallTool(
+        {
+          params: {
+            name: "claude_prompt_structured",
+            arguments: { prompt: "first", schema: { type: "object" } },
+          },
+        },
+        { signal: cancelled.signal },
+      );
+      const second = handleCallTool({
+        params: {
+          name: "claude_prompt_structured",
+          arguments: { prompt: "second", schema: { type: "object" } },
+        },
+      });
+      setTimeout(() => cancelled.abort(), 50);
+
+      const [firstResult, secondResult] = await Promise.all([first, second]);
+      assert.equal(firstResult.isError, true);
+      assert.match(firstResult.content[0].text, /cancelled/);
+      assert.equal(secondResult.isError, undefined);
+      assert.deepEqual(JSON.parse(secondResult.content[0].text), { name: "stub" });
+    } finally {
+      delete process.env.CLAUDECODE_MCP_FAKE_HELP_DELAY_MS;
+      resetFlagCache();
+    }
+  },
+  { timeout: 10000 },
+);
 
 test("handleCallTool: null arguments yield isError", async () => {
   const res = await handleCallTool({

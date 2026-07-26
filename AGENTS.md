@@ -41,8 +41,8 @@ required CI workflow runs:
 - `npx tsc --noEmit -p tsconfig.json`
 - `npm run build`
 - `npm test`
-- `npm audit --omit=dev --audit-level=high`
-- `npm audit --audit-level=high`
+- `npm audit --omit=dev --audit-level=high` (blocking)
+- `npm audit --audit-level=high` (advisory for development-only transitives)
 
 Manual compatibility coverage can be run on demand. Release validation follows
 the required checks on Node 20 and 22 and also runs `npm pack --dry-run`.
@@ -76,8 +76,9 @@ Tests live in `test/` and import compiled modules from `dist/`.
 - Prompts above `MAX_PROMPT_ARG_BYTES` (100 KiB) must be delivered to the
   child via stdin, never as a positional argv element: Linux caps a single
   argv string at 128 KiB (`MAX_ARG_STRLEN`), and anything larger fails the
-  spawn with `E2BIG`. Keep prompt routing centralized in
-  `routePromptDelivery()`.
+  spawn with `E2BIG`. On Windows, routing must also account for the 32,767
+  UTF-16-unit limit on the complete command line. Keep prompt routing
+  centralized in `routePromptDelivery()`.
 - Keep CLI flag construction centralized in `baseClaudeArgs()`.
 - Default mode must not load the user's MCP servers. Non-bare calls must pin
   `--strict-mcp-config --mcp-config '{"mcpServers":{}}'`.
@@ -86,16 +87,25 @@ Tests live in `test/` and import compiled modules from `dist/`.
   setting.
 - The child environment must be an explicit allowlist. Do not pass through the
   full parent environment. Known-dangerous variables stay stripped unless
-  `CLAUDECODE_MCP_FORWARD_DANGEROUS=1` is set.
+  `CLAUDECODE_MCP_FORWARD_DANGEROUS=1` is set. Keep `skill.sh` aligned with
+  the server allowlist.
 - `claude_prompt_with_context` file paths must be relative and contained under
   the server cwd. Absolute paths, `..` escapes, and outbound symlinks are
-  rejected. Keep the per-file size cap.
+  rejected. Keep the per-file, file-count, and aggregate-context caps.
 - File context blocks use sentinel fences like `----- file: NAME -----`, not
   pseudo-XML wrappers.
 - Keep per-call timeout and output caps. When a cap is exceeded, reject with a
   typed error; do not silently truncate output.
+- Propagate the MCP request `AbortSignal` to active CLI invocations. On POSIX,
+  timeout, cancellation, and output-limit cleanup must terminate the complete
+  process group so descendants cannot outlive a tool call.
+- Keep every non-prompt argv value explicitly bounded. In particular,
+  `system_prompt` and serialized JSON schemas must remain below the per-argument
+  operating-system limit, their combined Windows command line must be checked
+  before spawn, and schema traversal must stay resource-bounded.
 - Errors returned to MCP clients must be redacted and capped. Full diagnostics
-  can go to local stderr, but client-facing messages must not expose secrets.
+  can go to local stderr, but raw subprocess stderr and client-facing messages
+  must not expose secrets.
 - `claude_prompt` must parse `--output-format json` output. Do not fall back to
   raw stdout when parsing fails.
 - `claude_prompt_structured` requires the CLI's `--json-schema` flag and fails

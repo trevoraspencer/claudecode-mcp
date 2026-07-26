@@ -1,5 +1,5 @@
 // Regression tests for performance hot-path findings:
-//   PERF-002 (parallel file reads preserve order)
+//   PERF-002 (bounded file reads preserve order)
 //   PERF-003 (optional pre-computed baseReal)
 //   PERF-004 (child-env caching with invalidation)
 
@@ -28,7 +28,7 @@ process.env.CLAUDECODE_MCP_FAKE_HAS_JSON_SCHEMA = "1";
 process.env.CLAUDECODE_MCP_FAKE_MODE = "ok";
 
 // ---------------------------------------------------------------------------
-// PERF-002: Parallel file reads preserve prompt order
+// PERF-002: Bounded file reads preserve prompt order
 // ---------------------------------------------------------------------------
 
 const { runClaudePromptWithContext } = await import("../dist/server.js");
@@ -36,7 +36,7 @@ const { readFileSync } = await import("node:fs");
 
 const origCwd = process.cwd();
 
-test("PERF-002: multiple files are read in parallel but assembled in prompt order", async () => {
+test("PERF-002: multiple bounded file reads preserve prompt order", async () => {
   process.chdir(TMP);
   try {
     // Create three files with distinct content
@@ -71,7 +71,7 @@ test("PERF-002: multiple files are read in parallel but assembled in prompt orde
   }
 });
 
-test("PERF-002: parallel reads still reject invalid paths", async () => {
+test("PERF-002: bounded reads still reject invalid paths", async () => {
   process.chdir(TMP);
   try {
     writeFileSync(join(TMP, "good.txt"), "good");
@@ -120,7 +120,7 @@ test("PERF-003: safeReadFileUnderCwd with baseReal still rejects escapes", async
 });
 
 // ---------------------------------------------------------------------------
-// PERF-004: Child-env caching with fingerprint-based invalidation
+// PERF-004: Child-env caching with exact-snapshot invalidation
 // ---------------------------------------------------------------------------
 
 const { invokeCli, resetEnvCache } = await import("../dist/invoke.js");

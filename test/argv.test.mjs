@@ -46,6 +46,8 @@ const {
   routePromptDelivery,
   MAX_PROMPT_ARG_BYTES,
 } = await import("../dist/server.js");
+const { assertArgvWithinPlatformLimit, WINDOWS_COMMAND_LINE_MAX_UNITS } =
+  await import("../dist/invoke.js");
 
 function readArgv() {
   return JSON.parse(readFileSync(OUTFILE, "utf8"));
@@ -192,6 +194,34 @@ test("routePromptDelivery: threshold is measured in UTF-8 bytes, not characters"
 
 test("MAX_PROMPT_ARG_BYTES leaves headroom under Linux MAX_ARG_STRLEN (128 KiB)", () => {
   assert.ok(MAX_PROMPT_ARG_BYTES < 128 * 1024);
+});
+
+test("Windows routing accounts for the complete command line, not only prompt bytes", () => {
+  const systemPrompt = "s".repeat(20_000);
+  const prompt = "p".repeat(20_000);
+  const args = ["--append-system-prompt", systemPrompt];
+  const before = [...args];
+  assert.ok(Buffer.byteLength(prompt) < MAX_PROMPT_ARG_BYTES);
+  assert.equal(routePromptDelivery(args, prompt, "win32", "claude"), prompt);
+  assert.deepEqual(args, before, "prompt routed to stdin must not mutate argv");
+});
+
+test("Windows routing keeps a small complete command line on argv", () => {
+  const args = ["--print"];
+  assert.equal(routePromptDelivery(args, "small", "win32", "claude"), undefined);
+  assert.deepEqual(args, ["--print", "--", "small"]);
+});
+
+test("oversized non-prompt Windows argv is rejected before spawn", () => {
+  assert.throws(
+    () =>
+      assertArgvWithinPlatformLimit(
+        "claude",
+        ["--append-system-prompt", "s".repeat(WINDOWS_COMMAND_LINE_MAX_UNITS)],
+        "win32",
+      ),
+    /Windows command-line limit/,
+  );
 });
 
 test("H1: runClaudePrompt delivers a >128 KiB prompt via stdin (no E2BIG)", async () => {

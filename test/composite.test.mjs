@@ -131,6 +131,24 @@ test("composite: oversized file is rejected via the size cap", async () => {
   }
 });
 
+test("composite: aggregate context bytes are capped across text and files", async () => {
+  writeFileSync(join(TMP, "aggregate.txt"), "12345678");
+  process.env.CLAUDECODE_MCP_MAX_CONTEXT_BYTES = "10";
+  try {
+    await assert.rejects(
+      () =>
+        runClaudePromptWithContext({
+          prompt: "p",
+          context: "abcd",
+          files: ["aggregate.txt"],
+        }),
+      /included context exceeds 10 total UTF-8 bytes/,
+    );
+  } finally {
+    delete process.env.CLAUDECODE_MCP_MAX_CONTEXT_BYTES;
+  }
+});
+
 // CORR-004/L3: fence-like lines inside file bodies must be neutralized, for
 // runs of exactly 5 hyphens AND longer runs (which would still read as a
 // block terminator to the consuming LLM).

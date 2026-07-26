@@ -1,5 +1,5 @@
-// Tests for parseJsonLoose: fast path, line-by-line fallback, balanced-
-// bracket scan, and the empty-input case.
+// Tests for parseJsonLoose: fast path, bounded balanced-bracket recovery,
+// diagnostic disambiguation, and the empty-input case.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -18,7 +18,7 @@ test("whitespace around valid JSON is fine", () => {
   assert.deepEqual(parseJsonLoose('  {"a":1}\n'), { a: 1 });
 });
 
-test("line-by-line: ignores leading log lines and parses a JSON line", () => {
+test("recovery: ignores leading log lines and parses a JSON line", () => {
   const stdout = '[debug] starting up\nsome warning\n{"result":"ok"}\n';
   assert.deepEqual(parseJsonLoose(stdout), { result: "ok" });
 });
@@ -32,11 +32,21 @@ test("balanced-bracket: picks the longest balanced region", () => {
   // Two balanced regions: {"x":1} and {"y":2,"z":{"w":3}}. The second is
   // longer, so it should win.
   const stdout = '{"x":1}\n--- separator ---\n{"y":2,"z":{"w":3}}';
-  // The line-by-line scan will find {"x":1} first on its own line, so this
-  // tests that ANY of the line candidates parses (line scan wins here). That
-  // is acceptable behavior; just assert we got something parseable.
-  const got = parseJsonLoose(stdout);
-  assert.ok(typeof got === "object" && got !== null);
+  assert.deepEqual(parseJsonLoose(stdout), { y: 2, z: { w: 3 } });
+});
+
+test("recovery prefers a Claude payload over valid JSON diagnostics", () => {
+  const stdout = [
+    '{"level":"debug","message":"starting"}',
+    '["another valid diagnostic"]',
+    '{"result":"actual response"}',
+  ].join("\n");
+  assert.deepEqual(parseJsonLoose(stdout), { result: "actual response" });
+});
+
+test("an unmatched diagnostic bracket cannot poison a later standalone response", () => {
+  const stdout = 'diagnostic left an unmatched {\n{"result":"recovered"}\n';
+  assert.deepEqual(parseJsonLoose(stdout), { result: "recovered" });
 });
 
 test("balanced-bracket: string contents with quoted braces don't confuse it", () => {
@@ -61,7 +71,23 @@ test("totally unparseable input throws", () => {
   );
 });
 
+test("parse errors do not echo a raw stdout prefix", () => {
+  const raw = "sensitive-arbitrary-value that is not JSON";
+  assert.throws(
+    () => parseJsonLoose(raw),
+    (err) => err instanceof Error && !err.message.includes("sensitive-arbitrary-value"),
+  );
+});
+
 test("mismatched brackets do not yield a bogus parse", () => {
   // No balanced region; nothing should parse.
   assert.throws(() => parseJsonLoose("garbage [ noise } valid"), /failed to parse JSON/);
+});
+
+test("fallback scan bounds adversarial nesting and candidate counts", () => {
+  assert.throws(
+    () => parseJsonLoose(`${"[".repeat(1025)}noise${"]".repeat(1025)}`),
+    /nesting exceeds 1024/,
+  );
+  assert.throws(() => parseJsonLoose("{}\n".repeat(1001)), /candidate count exceeds 1000/);
 });
