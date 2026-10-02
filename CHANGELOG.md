@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Refreshed the lockfile to pick up patched transitive dependencies
+  (`fast-uri` 3.1.8, `hono` 4.13.12, `ip-address` 10.7.3, `qs` 6.16.0),
+  clearing a HIGH `fast-uri` advisory that failed the blocking production
+  `npm audit` step.
 - MCP request cancellation now reaches the active Claude subprocess instead of
   leaving it running until the ten-minute timeout. Timeout, cancellation, and
   output-limit cleanup terminate the complete POSIX process group (including
