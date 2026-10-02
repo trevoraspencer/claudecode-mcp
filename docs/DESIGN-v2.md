@@ -33,12 +33,14 @@ Windows.
 | Progress | For the calling agent (structured), not a live human view |
 | Durability | Tasks survive an MCP server restart |
 | Workspace | Git worktree per task by default; in-place option |
-| Permissions | Full power (`bypassPermissions`) |
+| Permissions | `auto` mode by default (a safety check decides each action); `bypassPermissions` per profile (see 6.1) |
 | Parallelism | Several tasks at once, with a cap |
 | Auth | Pro/Max subscription via the user's own `claude` login |
 | Time limits | Long cap (2 h) plus stall detection (10 min without events) |
 | Model / effort | Caller picks per task; otherwise CLI default |
 | User config | Server-owned **profiles**, separate from the personal setup (see 6) |
+| MCP servers | Set per install in the server config; default none |
+| Hooks / skills | Default: only what the target repo defines (see 6) |
 | Old code | Fresh rewrite; port the proven parts |
 | Name | Keep `claudecode-mcp` |
 
@@ -69,6 +71,15 @@ Other findings:
 - The CLI refuses plain long `sleep` commands. Not a problem for real work.
 - Hosted-container env vars (for example `CLAUDE_AUTO_BACKGROUND_TASKS`) change
   child behavior. The env allowlist must keep them out.
+- **`auto` permission mode works headless** with `sonnet` and `opus`
+  (`--permission-mode auto --permission-prompts none`). It ran normal edits,
+  commits, and a force-push to a throwaway local remote without prompts.
+- **`auto` silently falls back to `default` with `haiku`.** No error; the
+  `system/init` event reports `permissionMode: "default"`. Headless, `default`
+  denies anything that would need a prompt.
+- With no profile isolation, the child **inherited the host's personal
+  instructions** (it added commit trailers "as the session instructions
+  require"). This confirms the need for profiles.
 
 **Decision: engine A.** B has nice human features (`attach`), but it fails two
 hard needs: structured progress and messaging a live task.
@@ -150,7 +161,7 @@ sends SIGINT, waits for the final result event, then resumes with the message.
 
 **Result of a finished turn.** Claude's final text, `output_schema` result (from
 `structured_output`) when given, branch, diff stat, turns, duration, token
-usage, and `total_cost_usd` (estimate only on a subscription).
+usage, `permission_denials`, and `total_cost_usd` (estimate only on a subscription).
 
 ### Task states
 
@@ -169,7 +180,8 @@ task picks a **profile** from the server config. A profile maps to CLI flags:
 | `setting_sources` | `--setting-sources` | e.g. `["project","local"]` drops `~/.claude/settings.json` (your hooks, permissions, plugins) |
 | `settings` | `--settings <file>` | the profile's own hooks, permission deny rules, env |
 | `mcp_servers` | `--strict-mcp-config --mcp-config <json>` | **exact** MCP server list; personal servers ignored |
-| `disallowed_tools` | `--disallowedTools` | block tools, e.g. `mcp__gmail__send_message`, `Bash(git push *)` |
+| `permission_mode` | `--permission-mode` | `auto` (default) or `bypassPermissions` |
+| `disallowed_tools` | `--disallowedTools` | extra hard blocks, e.g. `mcp__gmail__send_message` |
 | `tools` | `--tools` | allow only these built-in tools |
 | `plugin_dirs` | `--plugin-dir` | load only these plugins (and their skills) |
 | `skills` | `--disable-slash-commands` when `false` | turn all skills off |
@@ -187,17 +199,23 @@ Example `~/.config/claudecode-mcp/config.json`:
   "default_profile": "worker",
   "profiles": {
     "worker": {
+      "permission_mode": "auto",
       "setting_sources": ["project", "local"],
-      "settings": "~/.config/claudecode-mcp/worker-settings.json",
-      "mcp_servers": { "github": { "command": "github-mcp-server", "args": ["stdio"] } },
-      "disallowed_tools": ["Bash(git push *)"]
+      "mcp_servers": {}
+    },
+    "worker-github": {
+      "permission_mode": "auto",
+      "setting_sources": ["project", "local"],
+      "mcp_servers": { "github": { "command": "github-mcp-server", "args": ["stdio"] } }
     },
     "reviewer-clean": {
+      "permission_mode": "auto",
       "setting_sources": ["project"],
       "mcp_servers": {},
       "skills": false
     },
     "personal": {
+      "permission_mode": "bypassPermissions",
       "setting_sources": ["user", "project", "local"],
       "inherit_user_mcp": true
     }
@@ -212,6 +230,26 @@ Always on, for every profile:
   starts with depth ≥ 1, its task tools refuse to run. No recursive fan-out.
 - The env allowlist from v1 stays (extended with profile `env`). Host-specific
   vars like `CLAUDECODE` and `CLAUDE_AUTO_BACKGROUND_TASKS` are never passed.
+
+Defaults when the config file has no profiles: one `worker` profile with
+`auto` mode, no MCP servers, and only the target repo's own settings, hooks,
+and skills (`setting_sources: ["project", "local"]`).
+
+### 6.1 Permissions: `auto` mode
+
+- Default `permission_mode` is `auto`, always with `--permission-prompts none`
+  so nothing can hang waiting for a person.
+- `auto`'s built-in rules block high-risk actions: production deploys,
+  sending private data outside trusted repos, destructive git on shared
+  history, mass deletes, publishing packages, weakening security, and more
+  (`claude auto-mode defaults` prints them). Rules can be tuned in the
+  profile's `settings` (`autoMode` section).
+- `auto` needs `sonnet` or `opus`. The runner reads `permissionMode` from the
+  `system/init` event; if it is not the requested mode, the task fails at once
+  with a clear error (no silent fallback).
+- Blocked actions are listed in the result (`permission_denials`), so the
+  caller can see what was refused and decide what to do.
+- `bypassPermissions` stays available per profile for full power.
 
 ## 7. Human take-over
 
@@ -269,3 +307,5 @@ Tests: offline tests use a fake `claude` that emits stream-json; live tests
 3. Public release: check Anthropic's current terms for using a subscription
    login through third-party tools before publishing.
 4. Should `push_pr` use `gh`, or only push the branch?
+5. Is `auto` mode available on every plan you will use (Pro vs. Max)? Tested
+   here only on one account. If not, the default profile needs a fallback.
