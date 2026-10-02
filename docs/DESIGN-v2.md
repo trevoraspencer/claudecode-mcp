@@ -40,7 +40,7 @@ Windows.
 | Model / effort | Caller picks per task; otherwise CLI default |
 | User config | Server-owned **profiles**, separate from the personal setup (see 6) |
 | MCP servers | Set per install in the server config; default none |
-| Hooks / skills | Default: only what the target repo defines (see 6) |
+| Hooks / skills | Default: the target repo's own, plus a configurable set of personal hooks and skills (see 6.2) |
 | Old code | Fresh rewrite; port the proven parts |
 | Name | Keep `claudecode-mcp` |
 
@@ -185,6 +185,8 @@ task picks a **profile** from the server config. A profile maps to CLI flags:
 | `tools` | `--tools` | allow only these built-in tools |
 | `plugin_dirs` | `--plugin-dir` | load only these plugins (and their skills) |
 | `skills` | `--disable-slash-commands` when `false` | turn all skills off |
+| `personal_hooks` | merged into a generated `--settings` file | chosen hook entries from `~/.claude/settings.json` (see 6.2) |
+| `personal_skills` | generated `--plugin-dir` | chosen skills from `~/.claude/skills` (see 6.2) |
 | `config_dir` | `CLAUDE_CONFIG_DIR` env | fully separate Claude home (own settings, skills, sessions). Needs its own login or `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token` |
 | `model`, `effort` | `--model`, `--effort` | defaults; the caller can override |
 
@@ -201,7 +203,9 @@ Example `~/.config/claudecode-mcp/config.json`:
     "worker": {
       "permission_mode": "auto",
       "setting_sources": ["project", "local"],
-      "mcp_servers": {}
+      "mcp_servers": {},
+      "personal_hooks": ["PostToolUse:format-on-edit"],
+      "personal_skills": ["commit-style", "test-runner"]
     },
     "worker-github": {
       "permission_mode": "auto",
@@ -232,8 +236,9 @@ Always on, for every profile:
   vars like `CLAUDECODE` and `CLAUDE_AUTO_BACKGROUND_TASKS` are never passed.
 
 Defaults when the config file has no profiles: one `worker` profile with
-`auto` mode, no MCP servers, and only the target repo's own settings, hooks,
-and skills (`setting_sources: ["project", "local"]`).
+`auto` mode, no MCP servers, the target repo's own settings, hooks, and skills
+(`setting_sources: ["project", "local"]`), and empty `personal_hooks` /
+`personal_skills` lists for the user to fill.
 
 ### 6.1 Permissions: `auto` mode
 
@@ -244,12 +249,33 @@ and skills (`setting_sources: ["project", "local"]`).
   history, mass deletes, publishing packages, weakening security, and more
   (`claude auto-mode defaults` prints them). Rules can be tuned in the
   profile's `settings` (`autoMode` section).
-- `auto` needs `sonnet` or `opus`. The runner reads `permissionMode` from the
+- `auto` is the default mode for all of the user's Claude Code sessions, so it
+  is available on their plan. It needs `sonnet` or `opus`. The runner reads `permissionMode` from the
   `system/init` event; if it is not the requested mode, the task fails at once
   with a clear error (no silent fallback).
 - Blocked actions are listed in the result (`permission_denials`), so the
   caller can see what was refused and decide what to do.
 - `bypassPermissions` stays available per profile for full power.
+
+### 6.2 Picking personal hooks and skills
+
+The user's full personal setup is not loaded, but chosen parts of it can be:
+
+- **Hooks:** `personal_hooks` lists entries as `<Event>:<id>` (or an index).
+  At task start the server reads `~/.claude/settings.json`, copies only those
+  hook entries into a generated settings file, and passes it with
+  `--settings`. Hooks that send notifications or block on `Stop` should not be
+  picked.
+- **Skills:** `personal_skills` lists folder names under `~/.claude/skills`.
+  The server builds a small plugin folder (manifest + links to the chosen
+  skill folders) in the state dir and passes it with `--plugin-dir`. Skills
+  loaded this way may show with a plugin prefix (for example
+  `claudecode-personal:commit-style`).
+- A `list_personal_config` helper (CLI command, not an MCP tool) prints the
+  available hook entries and skill names, to make filling the config easy.
+
+To verify in build step 5: the exact hook-entry naming, and that
+`--setting-sources project,local` does not load `~/.claude/skills` on its own.
 
 ## 7. Human take-over
 
@@ -307,5 +333,5 @@ Tests: offline tests use a fake `claude` that emits stream-json; live tests
 3. Public release: check Anthropic's current terms for using a subscription
    login through third-party tools before publishing.
 4. Should `push_pr` use `gh`, or only push the branch?
-5. Is `auto` mode available on every plan you will use (Pro vs. Max)? Tested
-   here only on one account. If not, the default profile needs a fallback.
+5. For a public release: `auto` may not be on every plan. Keep the
+   init-event mode check and a clear error so users can pick another profile.
