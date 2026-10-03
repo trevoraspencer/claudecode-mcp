@@ -55,13 +55,15 @@ test("unknown commands exit 2", () => {
   assert.match(r.stderr, /unknown command: bogus/);
 });
 
-test("runner needs exactly one task id and is not implemented yet", () => {
+test("runner needs exactly one valid task id", () => {
   assert.equal(run(["runner"]).status, 2);
-  const r = run(["runner", "abc"]);
-  assert.equal(r.status, 1);
-  const line = JSON.parse(r.stderr.trim().split("\n").at(-1));
-  assert.equal(line.level, "fatal");
-  assert.match(line.error, /not implemented/);
+  for (const id of ["abc", "../../etc", "t0000000000"]) {
+    const r = run(["runner", id]);
+    assert.equal(r.status, 1, id);
+    const line = JSON.parse(r.stderr.trim().split("\n").at(-1));
+    assert.equal(line.level, "fatal");
+    assert.match(line.error, /task not found/);
+  }
 });
 
 test("entrypoint detection compares canonical paths", () => {

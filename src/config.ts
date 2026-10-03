@@ -135,6 +135,14 @@ export const configSchema = z
       .min(1)
       .max(24 * 60)
       .default(10),
+    /** How long an idle runner keeps `claude` alive before exiting (resume later). */
+    idle_minutes: z
+      .int()
+      .min(1)
+      .max(24 * 60)
+      .default(15),
+    /** Cap on a task's events.jsonl; reaching it stops the task. */
+    max_events_mb: z.int().min(1).max(10_240).default(100),
     stale_days: z.int().min(1).max(365).default(7),
     default_profile: profileName.default(DEFAULT_PROFILE_NAME),
     profiles: z.record(profileName, profileSchema).default({}),
