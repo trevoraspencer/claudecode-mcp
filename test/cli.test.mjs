@@ -130,7 +130,7 @@ function startServer(env) {
   return { child, request };
 }
 
-test("stdio: initialize, then tools/list returns no tools yet", async () => {
+test("stdio: initialize, then tools/list returns the task tools", async () => {
   const env = isolatedEnv();
   const { child, request } = startServer(env);
   const init = await request("initialize", {
@@ -143,7 +143,7 @@ test("stdio: initialize, then tools/list returns no tools yet", async () => {
   child.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
 
   const list = await request("tools/list", {});
-  assert.deepEqual(list.result.tools, []);
+  assert.equal(list.result.tools.length, 8);
 
   const call = await request("tools/call", { name: "nope", arguments: {} });
   assert.equal(call.result.isError, true);

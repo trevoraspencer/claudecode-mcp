@@ -40,6 +40,12 @@ v2 rebuild in progress (see `docs/DESIGN-v2.md`). Will ship as 2.0.0.
   stops the whole process group on cancel. A task fails at once if `claude`
   starts in a different permission mode than requested.
 - New config keys `idle_minutes` (default 15) and `max_events_mb` (default 100).
+- MCP tools: `start_task` (in_place), `get_task`, `wait_task`, `get_events`,
+  `send_message` (mid-turn, interrupt, or resume), `cancel_task`,
+  `list_tasks`, and `ask` (blocking; read-only by default via plan mode and
+  blocked file tools; temp folder when no repo; progress notifications).
+  Repos must be inside `allowed_roots`. `get_task` includes a ready
+  `claude --resume` take-over command.
 
 ### Removed
 

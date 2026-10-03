@@ -168,7 +168,22 @@ $XDG_STATE_HOME/claudecode-mcp/          (default ~/.local/state/claudecode-mcp)
 | `cancel_task` | `task_id` | final status |
 | `list_tasks` | `status?`, `repo?` | task summaries |
 | `close_task` | `task_id`, `action?`, `force?` | what was removed / pushed |
-| `ask` (convenience) | `prompt`, `repo?`, `profile?`, `model?`, `effort?`, `timeout_s?` | final text. Blocking, `in_place`, closed after. For quick reviews. |
+| `ask` (convenience) | `prompt`, `repo?`, `profile?`, `model?`, `effort?`, `timeout_s?`, `writable?` | final text. Blocking, `in_place`, closed after. For quick reviews. |
+
+**`ask` details (step 3).** Read-only unless `writable: true`: permission mode
+`plan` plus blocked `Edit`, `Write`, `NotebookEdit` (plan mode alone still
+writes a plan file under `~/.claude/plans`). Plan mode works headless with
+`haiku`, so cheap reviews need no `auto`-capable model. Without `repo` it
+runs in a fresh empty temp folder, removed afterwards. `timeout_s` default
+300, max 600, with MCP progress notifications. `wait_task` caps `timeout_s` at
+50 so calls stay under common 60 s client timeouts; callers loop. The task
+record is kept as `closed` for audit.
+
+Probe (step 3): in a folder that was never trusted interactively, headless
+`claude` **ignores** the project's `permissions.allow` entries (it says so on
+stderr), and plan mode refused a `touch` even with `Bash(*)` allowed. Not yet
+verified: plan mode in a *trusted* repo with broad allow rules (see open
+question 6).
 
 **Steering.** `send_message` without `interrupt` goes into the running turn
 (the test showed Claude handles it in the same turn). If the task is idle, the
@@ -338,6 +353,9 @@ Release as **2.0.0** (breaking). Rewrite `AGENTS.md` invariants to match.
    cap stops the task.
 3. Core tools: `start_task` (`in_place` only), `get_task`, `wait_task`,
    `get_events`, `send_message`, `cancel_task`, `list_tasks`, `ask`.
+   **Done.** Decisions: `ask` without `repo` uses an empty temp folder;
+   `ask` is read-only by default; `wait_task` max 50 s, `ask` max 600 s;
+   `max_concurrent` is not enforced until step 6.
 4. Worktrees: `isolation: "worktree"`, `get_diff`, `close_task`.
 5. Profiles (section 6).
 6. Restart recovery, `interrupted` state, `max_concurrent` queue, rate-limit
@@ -360,3 +378,7 @@ Tests: offline tests use a fake `claude` that emits stream-json; live tests
 4. Should `push_pr` use `gh`, or only push the branch?
 5. For a public release: `auto` may not be on every plan. Keep the
    init-event mode check and a clear error so users can pick another profile.
+6. In a trusted repo whose `.claude/settings.json` allows `Bash(*)`, does
+   plan mode still refuse state-changing commands? If not, read-only `ask`
+   must also drop project settings or block `Bash`. Verify in step 5 with a
+   separate `config_dir` (do not edit the user's `~/.claude.json`).

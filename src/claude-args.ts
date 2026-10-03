@@ -3,12 +3,16 @@
  * visible together. Prompts never appear here: they go on stdin as
  * stream-json messages.
  *
- * Build step 2 maps the core profile fields. The rest of section 6
+ * Build steps 2-3 map the core profile fields and `disallowed_tools`. The rest of section 6
  * (settings, tools, plugins, personal hooks and skills, config_dir) arrives
  * in build step 5.
  */
 
-import type { TaskSpec } from "./task-store.js";
+import type { PermissionMode, TaskSpec } from "./task-store.js";
+
+export function effectivePermissionMode(spec: TaskSpec): PermissionMode {
+  return spec.permission_mode ?? spec.profile.permission_mode;
+}
 
 /** Linux caps one argv string at 128 KiB (MAX_ARG_STRLEN); stay well below. */
 export const MAX_ARG_BYTES = 100 * 1024;
@@ -41,7 +45,7 @@ export function buildClaudeArgs(
     session.resume ? "--resume" : "--session-id",
     session.id,
     "--permission-mode",
-    p.permission_mode,
+    effectivePermissionMode(spec),
     // Nobody is there to answer a prompt: anything that would prompt is denied.
     "--permission-prompts",
     "none",
@@ -64,5 +68,8 @@ export function buildClaudeArgs(
   if (spec.output_schema) {
     args.push("--json-schema", bounded("output_schema", JSON.stringify(spec.output_schema)));
   }
+  const blocked = [...new Set([...p.disallowed_tools, ...(spec.extra_disallowed_tools ?? [])])];
+  // Variadic flag: keep it after every other flag so it consumes nothing else.
+  if (blocked.length > 0) args.push("--disallowedTools", ...blocked);
   return args;
 }
