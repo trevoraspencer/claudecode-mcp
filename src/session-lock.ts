@@ -5,6 +5,7 @@
  */
 
 import { linkSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { uptime } from "node:os";
 import { join } from "node:path";
 import { stateDir } from "./paths.js";
 import { SESSION_ID_RE } from "./task-store.js";
@@ -30,17 +31,39 @@ export function pidAlive(pid: number): boolean {
   }
 }
 
+/** Wall-clock time of the last boot, in ms. */
+export function bootTimeMs(): number {
+  return Date.now() - uptime() * 1000;
+}
+
+/**
+ * Is the process recorded as (pid, startedAt) still that process? A PID from
+ * before the last boot belongs to someone else now, even if it is alive.
+ */
+export function recordAlive(pid: number, startedAt?: string): boolean {
+  if (!pidAlive(pid)) return false;
+  const started = startedAt ? Date.parse(startedAt) : Number.NaN;
+  // One minute of slack for clock and uptime rounding.
+  return !(Number.isFinite(started) && started < bootTimeMs() - 60_000);
+}
+
 export function sessionLockPath(sessionId: string, env: NodeJS.ProcessEnv = process.env): string {
   if (!SESSION_ID_RE.test(sessionId)) throw new Error("invalid session id");
   return join(stateDir(env), "sessions", `${sessionId}.lock`);
 }
 
-function readHolder(path: string): number {
+function readHolder(path: string): { pid: number; started_at?: string } {
   try {
-    const parsed = JSON.parse(readFileSync(path, "utf8")) as { pid?: unknown };
-    return typeof parsed.pid === "number" ? parsed.pid : 0;
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as {
+      pid?: unknown;
+      started_at?: unknown;
+    };
+    return {
+      pid: typeof parsed.pid === "number" ? parsed.pid : 0,
+      ...(typeof parsed.started_at === "string" ? { started_at: parsed.started_at } : {}),
+    };
   } catch {
-    return 0;
+    return { pid: 0 };
   }
 }
 
@@ -62,7 +85,8 @@ export function acquireSessionLock(
   // Write the content to a temp file, then hard-link it into place: the lock
   // appears atomically with its PID, so no one can read it half-written.
   const tmp = `${path}.${process.pid}.tmp`;
-  writeFileSync(tmp, JSON.stringify({ pid: process.pid, task_id: taskId }) + "\n", {
+  const started_at = new Date().toISOString();
+  writeFileSync(tmp, JSON.stringify({ pid: process.pid, started_at, task_id: taskId }) + "\n", {
     mode: 0o600,
   });
   try {
@@ -73,9 +97,8 @@ export function acquireSessionLock(
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
         const holder = readHolder(path);
-        if ((holder !== process.pid && pidAlive(holder)) || attempt >= 2) {
-          throw new SessionBusyError(sessionId, holder);
-        }
+        const live = holder.pid !== process.pid && recordAlive(holder.pid, holder.started_at);
+        if (live || attempt >= 2) throw new SessionBusyError(sessionId, holder.pid);
         try {
           unlinkSync(path);
         } catch (e) {
@@ -87,7 +110,7 @@ export function acquireSessionLock(
     unlinkSync(tmp);
   }
   return () => {
-    if (readHolder(path) !== process.pid) return;
+    if (readHolder(path).pid !== process.pid) return;
     try {
       unlinkSync(path);
     } catch {

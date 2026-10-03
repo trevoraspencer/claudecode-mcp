@@ -25,11 +25,17 @@ export type TaskStatus =
   | "rate_limited"
   | "closed";
 
+export type PermissionMode = "auto" | "bypassPermissions" | "plan";
+
 /** What the runner needs to start `claude`. Limits are in milliseconds. */
 export interface TaskSpec {
   workdir: string;
   profile_name: string;
   profile: Profile;
+  /** Overrides the profile's mode; `ask` uses "plan" for read-only answers. */
+  permission_mode?: PermissionMode;
+  /** Blocked on top of the profile's `disallowed_tools`. */
+  extra_disallowed_tools?: string[];
   model?: string;
   effort?: string;
   system_prompt?: string;

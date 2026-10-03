@@ -13,9 +13,10 @@ changing behavior. v2 is built in steps (design section 10), one PR per step.
 v1 (one-shot `claude_prompt*` tools) was removed in step 1 and lives on in the
 1.x releases on npm.
 
-Build status: steps 1 (skeleton) and 2 (runner) are done. The server
-starts, loads config, and prepares the state dir; the runner can drive a
-task end to end. The server exposes no tools until step 3.
+Build status: steps 1-3 are done (skeleton, runner, core MCP tools). The
+server exposes `start_task` (in_place only), `get_task`, `wait_task`,
+`get_events`, `send_message`, `cancel_task`, `list_tasks`, and `ask`.
+Worktrees, `get_diff`, and `close_task` arrive in step 4.
 
 ## Core commands
 
@@ -63,7 +64,11 @@ runs `npm pack --dry-run`.
 - `src/task-store.ts` - task ids, task.json shape, atomic writes.
 - `src/session-lock.ts` - one process per session (lock file with PID).
 - `src/claude-args.ts` - the `claude` argv (all flag decisions in one place).
-- `src/server.ts` - stdio MCP server: startup (`prepare`), server factory.
+- `src/server.ts` - stdio MCP server: startup (`prepare`), tool schemas and
+  registration.
+- `src/service.ts` - the task operations behind the tools (`TaskService`).
+- `src/compact.ts` - compact steps and event pages from events.jsonl.
+- `src/repo.ts` - `repo` path checks against `allowed_roots` (realpath).
 - `src/config.ts` - config and profile schema (zod), `loadConfig`,
   `resolveProfile`.
 - `src/paths.ts` - config path, state dir, `ensureStateDir`.
@@ -118,6 +123,10 @@ Tests live in `test/` and import compiled modules from `dist/`.
   current user, mode 0700.
 - One active `claude` process per session. The CLI does not lock sessions;
   the runner takes `sessions/<session-id>.lock` before it starts `claude`.
+- Start runners only under the task's launch lock (`withLaunchLock`,
+  `tasks/<id>/launch.lock`), so concurrent calls never start two runners.
+  A recorded runner counts as alive only if its PID is alive, started
+  after the last boot, and (before replacing it) its socket answers.
 - While a runner is alive it is the only writer of its task.json. The server
   writes task.json only to create a task or before launching a runner.
   Writes are atomic (temp file + rename).
@@ -127,6 +136,14 @@ Tests live in `test/` and import compiled modules from `dist/`.
 - The events log is never silently truncated: reaching `max_events_mb`
   stops the task as `failed`.
 - `max_minutes` caps each turn, not idle time.
+- Every task tool that can start or resume work calls
+  `assertDepthAllowsTasks()` first.
+- A caller's `repo` must resolve (realpath) to a directory inside
+  `allowed_roots`.
+- `ask` is read-only unless `writable: true` (plan mode plus blocked file
+  tools). Without `repo` it runs in a fresh temp folder that is removed
+  afterwards.
+- `wait_task` never blocks longer than 50 s; `ask` never longer than 600 s.
 - Do not delete a task's worktree while the task can still be resumed:
   sessions are keyed by cwd.
 - On cancel, timeout, or cap, terminate the complete process group

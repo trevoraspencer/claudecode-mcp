@@ -42,3 +42,21 @@ test("live: one auto-mode turn with sonnet", { skip: !live, timeout: 180_000 }, 
     await requestRunner(id, { op: "cancel" }, env, 15_000).catch(() => {});
   }
 });
+
+test("live: read-only ask over MCP with haiku", { skip: !live, timeout: 180_000 }, async () => {
+  const { sandbox, startServer } = await import("./_mcp.mjs");
+  const box = sandbox();
+  delete box.env.CLAUDECODE_MCP_CLAUDE_BIN;
+  const srv = await startServer(box.env);
+  try {
+    const r = await srv.call(
+      "ask",
+      { prompt: "Reply with only the word: pong", model: "haiku", effort: "low", timeout_s: 120 },
+      { timeoutMs: 150_000 },
+    );
+    assert.equal(r.isError, false, r.text);
+    assert.match(r.text, /pong/i);
+  } finally {
+    srv.stop();
+  }
+});

@@ -21,12 +21,12 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { chmodSync, closeSync, fstatSync, openSync, unlinkSync, writeSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
-import { buildClaudeArgs } from "./claude-args.js";
+import { buildClaudeArgs, effectivePermissionMode } from "./claude-args.js";
 import { getClaudeBin } from "./claude-cli.js";
 import { buildChildEnv } from "./child-env.js";
 import { debugLog, errorLog, warnLog } from "./log.js";
 import { sanitizeForClient } from "./redaction.js";
-import { acquireSessionLock, pidAlive, SessionBusyError } from "./session-lock.js";
+import { acquireSessionLock, recordAlive, SessionBusyError } from "./session-lock.js";
 import {
   readTask,
   taskFiles,
@@ -143,8 +143,12 @@ class Runner {
   async run(): Promise<number> {
     this.state = readTask(this.id, this.env);
     this.files = taskFiles(this.id, this.env);
+    if (this.state.status === "cancelled" || this.state.status === "closed") {
+      debugLog({ phase: "runner_start", task_id: this.id, skipped: this.state.status });
+      return 0;
+    }
     const other = this.state.runner;
-    if (other && other.pid !== process.pid && pidAlive(other.pid)) {
+    if (other && other.pid !== process.pid && recordAlive(other.pid, other.started_at)) {
       errorLog({ phase: "runner_start", task_id: this.id, error: "another runner is active" });
       return 1;
     }
@@ -153,9 +157,14 @@ class Runner {
     } catch (err) {
       if (err instanceof SessionBusyError) {
         errorLog({ phase: "runner_start", task_id: this.id, error: err.message });
-        this.state.status = "failed";
-        this.state.error = err.message;
-        this.persistNow();
+        // Record the failure only if no live runner owns the task meanwhile.
+        const fresh = readTask(this.id, this.env);
+        if (!fresh.runner || !recordAlive(fresh.runner.pid, fresh.runner.started_at)) {
+          fresh.status = "failed";
+          fresh.error = err.message;
+          this.state = fresh;
+          this.persistNow();
+        }
         return 1;
       }
       throw err;
@@ -269,6 +278,11 @@ class Runner {
   private deliver(text: string, interrupt: boolean): Delivery {
     if (this.idleExit || this.sigintFallback) {
       this.queue.push(text);
+      if (this.idleExit && this.state.status !== "starting") {
+        // claude is exiting and will restart for this message; show it as busy.
+        this.state.status = "starting";
+        this.persistNow();
+      }
       return "queued";
     }
     if (!this.turnActive) {
@@ -474,7 +488,7 @@ class Runner {
     if (!this.turnActive && !this.stopping) this.markTurnStarted();
     this.state.session_started = true;
     this.state.pending_messages = [];
-    const want = this.state.spec.profile.permission_mode;
+    const want = effectivePermissionMode(this.state.spec);
     if (e.permissionMode !== want) {
       this.stop(
         "failed",
