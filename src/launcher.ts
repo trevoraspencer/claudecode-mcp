@@ -5,7 +5,15 @@
  */
 
 import { spawn } from "node:child_process";
-import { closeSync, openSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  openSync,
+  readFileSync,
+  statSync,
+  unlinkSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { connect } from "node:net";
 import { fileURLToPath } from "node:url";
@@ -142,9 +150,21 @@ export async function withLaunchLock<T>(
       await sleep(50);
     }
   }
+  // Keep the lock fresh while held: a long close (slow push) must not
+  // look stale to another caller.
+  const heartbeat = setInterval(() => {
+    try {
+      const now = new Date();
+      utimesSync(path, now, now);
+    } catch {
+      // removed under us; the holder check below handles it
+    }
+  }, LAUNCH_LOCK_STALE_MS / 4);
+  heartbeat.unref();
   try {
     return await fn();
   } finally {
+    clearInterval(heartbeat);
     try {
       if (readFileSync(path, "utf8") === body) unlinkSync(path);
     } catch {
@@ -243,7 +263,9 @@ export async function resumeTask(
         // stale record; fall through and replace it
       }
     }
-    if (state.status === "closed") throw new RunnerError(`task ${taskId} is closed`);
+    if (state.status === "closed" || state.status === "closing") {
+      throw new RunnerError(`task ${taskId} is ${state.status}`);
+    }
     // A runner that died without cleanup (SIGKILL, reboot) leaves a stale entry.
     state.runner = null;
     state.claude_pid = null;

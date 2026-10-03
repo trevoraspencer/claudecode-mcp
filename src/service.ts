@@ -11,7 +11,10 @@ import { cap, readEventsPage, recentSteps, type EventsPage, type Step } from "./
 import { taskDiff, type DiffResult } from "./diff.js";
 import {
   createWorktree,
+  currentBranch,
   dirtyFiles,
+  ignoredPaths,
+  nestedWorktrees,
   ghBin,
   git,
   removeWorktree,
@@ -34,6 +37,7 @@ import {
 } from "./launcher.js";
 import { errorLog } from "./log.js";
 import { expandHome, tasksDir } from "./paths.js";
+import { redactSecrets } from "./redaction.js";
 import { isInside, resolveRepo } from "./repo.js";
 import type { Delivery } from "./runner.js";
 import {
@@ -51,7 +55,7 @@ import {
 /** A turn is in progress (or about to be): waiting makes sense. */
 const BUSY = new Set<TaskStatus>(["starting", "running", "stalled"]);
 /** Finished for good unless a message resumes it. */
-const ENDED = new Set<TaskStatus>(["failed", "timed_out", "cancelled", "closed"]);
+const ENDED = new Set<TaskStatus>(["failed", "timed_out", "cancelled", "closing", "closed"]);
 
 export const WAIT_MAX_S = 50;
 export const ASK_MAX_S = 600;
@@ -190,6 +194,15 @@ export interface AskInput {
   writable?: boolean;
 }
 
+export interface CloseResult {
+  task: TaskView;
+  removed?: string;
+  branch_deleted?: string;
+  pushed?: string;
+  pr_url?: string;
+  notes: string[];
+}
+
 export type Progress = (elapsedS: number, totalS: number, message: string) => void;
 
 export class TaskService {
@@ -274,11 +287,26 @@ export class TaskService {
     await this.ensureCli();
     const { prompt, name, isolation: _i, base_ref: _b, repo: _r, ...rest } = input;
     const id = newTaskId();
-    const title = cap(name ?? prompt.split("\n")[0] ?? "task", 70);
+    // The title becomes a branch name and maybe a PR title: redact it.
+    const title = cap(redactSecrets(name ?? prompt.split("\n")[0] ?? "task"), 70);
     let workspace: Workspace;
     let wt: NewWorktree | undefined;
     if (isolation === "worktree") {
-      wt = await createWorktree({ repo, taskId: id, baseRef: input.base_ref, title });
+      const top = await repoTop(repo);
+      if (!top) throw new ToolError(`not a git repository: ${repo}; pass isolation: "in_place"`);
+      // The worktree mirrors the whole repo, so the repo's top level must be
+      // inside allowed_roots too (not just the folder the caller named).
+      const realTop = realpathSync.native(top);
+      if (
+        !this.config.allowed_roots.some(
+          (r) => existsSync(r) && isInside(realTop, realpathSync.native(r)),
+        )
+      ) {
+        throw new ToolError(
+          `the git repo containing ${repo} (${top}) is outside allowed_roots; pass isolation: "in_place"`,
+        );
+      }
+      wt = await createWorktree({ repo, top, taskId: id, baseRef: input.base_ref, title });
       workspace = {
         isolation,
         repo_root: wt.repo_root,
@@ -289,11 +317,13 @@ export class TaskService {
       };
     } else {
       const top = await repoTop(repo);
+      // A repo with no commits yet has no base; get_diff then says so.
+      const head = top ? await run("git", ["rev-parse", "--verify", "-q", "HEAD"], top) : null;
       workspace = top
         ? {
             isolation,
             repo_root: top,
-            base_commit: (await git(["rev-parse", "HEAD"], top)).trim(),
+            ...(head?.code === 0 ? { base_commit: head.stdout.trim() } : {}),
             title,
           }
         : { isolation, title };
@@ -322,7 +352,10 @@ export class TaskService {
     const s = this.read(id);
     const ws = s.workspace;
     const dir = ws?.worktree ?? ws?.repo_root;
-    if (!ws?.base_commit || !dir) throw new ToolError(`task ${id} is not in a git repo`);
+    if (!dir) throw new ToolError(`task ${id} is not in a git repo`);
+    if (!ws?.base_commit) {
+      throw new ToolError(`task ${id} has no base commit (its repo had no commits at start)`);
+    }
     if (s.status === "closed" && ws.worktree) {
       // The folder is gone; the branch still holds any commits.
       throw new ToolError(`task ${id} is closed; its worktree was removed (branch ${ws.branch})`);
@@ -339,14 +372,7 @@ export class TaskService {
     id: string,
     action: "keep_branch" | "delete" | "push_pr" = "keep_branch",
     force = false,
-  ): Promise<{
-    task: TaskView;
-    removed?: string;
-    branch_deleted?: string;
-    pushed?: string;
-    pr_url?: string;
-    notes: string[];
-  }> {
+  ): Promise<CloseResult> {
     this.guard();
     this.read(id);
     // Hold the launch lock throughout, so no message can resume the task
@@ -358,14 +384,7 @@ export class TaskService {
     id: string,
     action: "keep_branch" | "delete" | "push_pr",
     force: boolean,
-  ): Promise<{
-    task: TaskView;
-    removed?: string;
-    branch_deleted?: string;
-    pushed?: string;
-    pr_url?: string;
-    notes: string[];
-  }> {
+  ): Promise<CloseResult> {
     const notes: string[] = [];
     let s = this.read(id);
     if (s.status === "closed") return { task: this.view(id, 0), notes: ["already closed"] };
@@ -387,20 +406,37 @@ export class TaskService {
     }
     s = this.read(id);
     if (runnerAlive(s)) throw new ToolError(`task ${id} is still running; try again`);
-    const out: { removed?: string; branch_deleted?: string; pushed?: string; pr_url?: string } = {};
+    const out: Omit<CloseResult, "task" | "notes"> = {};
     if (wt?.worktree && wt.repo_root && wt.branch) {
       const { repo_root: root, worktree, branch } = wt;
       // A worktree has a .git file; checking with git would also succeed
       // from the parent repo if the folder were no longer a worktree.
       const exists = existsSync(join(worktree, ".git"));
-      if (!exists) await git(["worktree", "prune"], root).catch(() => {});
+      if (!exists) await run("git", ["worktree", "prune"], root).catch(() => {});
+
+      // ── checks first: nothing below may change state until they pass ──
       if (exists) {
-        const dirty = await dirtyFiles(worktree);
-        if (dirty.length > 0 && !force) {
+        const nested = await nestedWorktrees(root, worktree);
+        if (nested.length > 0) {
           throw new ToolError(
-            `task ${id} has uncommitted changes (${dirty.length} files: ${dirty.slice(0, 20).join(", ")}). ` +
-              "Ask Claude to commit them, or pass force: true to discard them.",
+            `task ${id}'s folder contains other worktrees (${nested.join(", ")}); close those tasks first`,
           );
+        }
+        if (!force) {
+          const dirty = await dirtyFiles(worktree);
+          if (dirty.length > 0) {
+            throw new ToolError(
+              `task ${id} has uncommitted changes (${dirty.length} files: ${dirty.slice(0, 20).join(", ")}). ` +
+                "Ask Claude to commit them, or pass force: true to discard them.",
+            );
+          }
+          const head = await currentBranch(worktree);
+          if (head !== branch) {
+            throw new ToolError(
+              `task ${id}'s worktree is on ${head ? `branch ${head}` : "a detached HEAD"}, not ${branch}; ` +
+                "commits made there would be lost. Ask Claude to move them to the task branch, or pass force: true.",
+            );
+          }
         }
       }
       if (action === "delete" && !force) {
@@ -412,6 +448,14 @@ export class TaskService {
           );
         }
       }
+      const ignored = exists ? await ignoredPaths(worktree) : [];
+
+      // Mark the task as closing before any slow step, so it can never be
+      // resumed into a folder that is going away, even if a step fails.
+      s = this.read(id);
+      s.status = "closing";
+      writeTask(s, this.env);
+
       if (action === "push_pr") {
         try {
           await git(["push", "-u", "origin", branch], exists ? worktree : root, {
@@ -419,18 +463,23 @@ export class TaskService {
             timeoutMs: 120_000,
           });
         } catch (err) {
-          throw new ToolError(`push failed: ${(err as Error).message}`);
+          throw new ToolError(
+            `push failed: ${(err as Error).message}. The task is "closing"; fix the remote and call close_task again.`,
+          );
         }
         out.pushed = branch;
-        const pr = await this.openDraftPr(s, branch, exists ? worktree : root).catch(
-          (err: Error) => ({ note: `draft PR not opened: ${err.message}` }),
-        );
+        const pr = await this.openDraftPr(s, branch, exists ? worktree : root);
         if ("url" in pr) out.pr_url = pr.url;
         else notes.push(pr.note);
       }
       if (exists) {
         await removeWorktree(root, worktree, force);
         out.removed = worktree;
+        if (ignored.length > 0) {
+          notes.push(
+            `removed ${ignored.length} ignored path(s) with the worktree: ${ignored.slice(0, 20).join(", ")}`,
+          );
+        }
       }
       if (action === "delete") {
         await git(["branch", "-D", branch], root);
@@ -448,8 +497,15 @@ export class TaskService {
     branch: string,
     cwd: string,
   ): Promise<{ url: string } | { note: string }> {
-    const title = s.workspace?.title ?? s.name ?? `claudecode-mcp task ${s.id}`;
-    const summary = s.result?.text ? `\n\n${cap(s.result.text, 5_000)}` : "";
+    // Title and body go to the remote: redact them like any client output.
+    const secrets = Object.values(s.spec.profile.env);
+    const title = redactSecrets(
+      s.workspace?.title ?? s.name ?? `claudecode-mcp task ${s.id}`,
+      secrets,
+    );
+    const summary = s.result?.text
+      ? `\n\n${redactSecrets(cap(s.result.text, 5_000), secrets)}`
+      : "";
     const body = `Opened by claudecode-mcp from task \`${s.id}\`.${summary}`;
     let r;
     try {
@@ -460,11 +516,17 @@ export class TaskService {
         cwd,
         { env: this.env, timeoutMs: 60_000 },
       );
-    } catch {
-      return { note: "gh is not installed; branch pushed, open the PR yourself" };
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+        return { note: "gh is not installed; branch pushed, open the PR yourself" };
+      }
+      return {
+        note: `gh pr create did not finish (${(err as Error).message}); check for a PR before retrying`,
+      };
     }
-    if (r.code !== 0)
+    if (r.code !== 0) {
       return { note: `gh pr create failed: ${(r.stderr || r.stdout).trim().slice(0, 300)}` };
+    }
     const url = r.stdout.trim().split("\n").at(-1) ?? "";
     return url ? { url } : { note: "gh did not print a PR URL" };
   }
@@ -502,7 +564,9 @@ export class TaskService {
     this.guard();
     for (let attempt = 0; attempt < 3; attempt++) {
       const s = this.read(id);
-      if (s.status === "closed") throw new ToolError(`task ${id} is closed`);
+      if (s.status === "closed" || s.status === "closing") {
+        throw new ToolError(`task ${id} is ${s.status}`);
+      }
       if (runnerAlive(s)) {
         try {
           const r = await requestRunner(id, { op: "message", text, interrupt }, this.env);

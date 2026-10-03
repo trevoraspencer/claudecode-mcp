@@ -311,3 +311,91 @@ test("gh gets --flag=value args, so a leading dash in the title is safe", async 
   assert.ok(args.includes("--title=--web"), args.join(" "));
   assert.equal(args.includes("--web"), false);
 });
+
+// ── regressions from the independent review ───────────────────────────
+
+test("a task's own worktree cannot be the repo for another worktree task", async (t) => {
+  const s = await server(t);
+  const a = await run(s, "nothing");
+  const r = await s.call("start_task", { prompt: "x", repo: a.workspace.worktree });
+  assert.equal(r.isError, true);
+  assert.match(r.text, /linked worktree/);
+});
+
+test("close refuses when another worktree sits inside the task's folder", async (t) => {
+  const s = await server(t);
+  const a = await run(s, "nothing");
+  const inner = join(a.workspace.worktree, "inner");
+  s.g("worktree", "add", "-q", "-b", "other", inner);
+  const r = await s.call("close_task", { task_id: a.task_id, force: true });
+  assert.equal(r.isError, true);
+  assert.match(r.text, /contains other worktrees/);
+  assert.ok(existsSync(inner));
+});
+
+test("close refuses a worktree whose HEAD left the task branch", async (t) => {
+  const s = await server(t);
+  const v = await run(s, "GIT checkout -q --detach\nWRITE x.txt x\nCOMMIT detached work");
+  const r = await s.call("close_task", { task_id: v.task_id });
+  assert.equal(r.isError, true);
+  assert.match(r.text, /detached HEAD/);
+  assert.ok(existsSync(v.workspace.worktree));
+  const forced = await s.call("close_task", { task_id: v.task_id, force: true });
+  assert.equal(forced.isError, false, forced.text);
+});
+
+test("a failed push leaves the task closing (not resumable); a retry finishes", async (t) => {
+  const s = await server(t, { CLAUDECODE_MCP_GH_BIN: "/nonexistent/gh" });
+  const v = await run(s, "WRITE f.txt f\nCOMMIT f");
+  const r = await s.call("close_task", { task_id: v.task_id, action: "push_pr" });
+  assert.equal(r.isError, true);
+  assert.match(r.text, /push failed.*closing/s);
+  assert.equal((await s.call("get_task", { task_id: v.task_id })).json.status, "closing");
+  const msg = await s.call("send_message", { task_id: v.task_id, text: "more" });
+  assert.match(msg.text, /closing/);
+  const remote = join(s.dir, "remote.git");
+  execFileSync("git", ["init", "-q", "--bare", remote]);
+  s.g("remote", "add", "origin", remote);
+  const retry = await s.call("close_task", { task_id: v.task_id, action: "push_pr" });
+  assert.equal(retry.isError, false, retry.text);
+  assert.equal(retry.json.task.status, "closed");
+});
+
+test("untracked diffs ignore a configured external diff tool", async (t) => {
+  const s = await server(t);
+  s.g("config", "diff.external", "/bin/echo");
+  const v = await run(s, "WRITE new.txt fresh");
+  const d = await s.call("get_diff", { task_id: v.task_id });
+  assert.match(d.json.diff, /\+fresh/);
+});
+
+test("repos with no commits: worktree is refused, in_place works", async (t) => {
+  const s = await server(t);
+  const empty = join(s.dir, "empty");
+  mkdirSync(empty);
+  execFileSync("git", ["init", "-q"], { cwd: empty });
+  const r = await s.call("start_task", { prompt: "x", repo: empty });
+  assert.match(r.text, /no commits yet/);
+  const ok = await s.call("start_task", { prompt: "x", repo: empty, isolation: "in_place" });
+  assert.equal(ok.isError, false, ok.text);
+  assert.equal(ok.json.workspace.base_commit, undefined);
+  const d = await s.call("get_diff", { task_id: ok.json.task_id });
+  assert.match(d.text, /no base commit/);
+});
+
+test("an untracked subfolder fails cleanly and leaves no branch behind", async (t) => {
+  const s = await server(t);
+  mkdirSync(join(s.repo, "build"));
+  const r = await s.call("start_task", { prompt: "x", repo: join(s.repo, "build") });
+  assert.equal(r.isError, true);
+  assert.match(r.text, /does not exist in the new worktree/);
+  assert.equal(s.g("branch", "--list", "claude/*"), "");
+  assert.equal(s.g("worktree", "list").trim().split("\n").length, 1);
+});
+
+test("secrets in the prompt never reach the branch name", async (t) => {
+  const s = await server(t);
+  const v = await run(s, "use key sk-ant-SECRETVALUE123 please");
+  assert.doesNotMatch(v.workspace.branch, /SECRETVALUE|secretvalue/);
+  assert.doesNotMatch(v.workspace.title, /SECRETVALUE/);
+});

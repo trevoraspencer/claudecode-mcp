@@ -194,3 +194,12 @@ test("every task tool refuses at depth 1", async (t) => {
     await assert.rejects(async () => call(), /recursive delegation/);
   }
 });
+
+test("a worktree is refused when the repo's top level is outside allowed_roots", async (t) => {
+  const ctx = setup(t);
+  const pkg = join(ctx.repo, "pkg");
+  mkdirSync(pkg);
+  writeFileSync(join(pkg, "a.txt"), "a\n");
+  const svc = new TaskService(parseConfig({ allowed_roots: [pkg] }), ctx.env);
+  await assert.rejects(svc.startTask({ prompt: "x", repo: pkg }), /outside allowed_roots/);
+});

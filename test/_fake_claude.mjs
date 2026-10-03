@@ -22,7 +22,8 @@
 //                      pid to <file>, then finish the turn
 //   IGNORE_INTERRUPT SILENT  as IGNORE_INTERRUPT, and exit on SIGINT without a result
 // Any line "WRITE <file> <text>" writes <text> to <file> (in cwd) and any line
-// "COMMIT <msg>" commits everything, before the turn's other behavior.
+// "COMMIT <msg>" commits everything, and any line "GIT <args>" runs git with
+// those args, before the turn's other behavior.
 // anything else       finish at once with result "echo: <text>"
 // A control_request interrupt ends the turn with error_during_execution and
 // keeps the process. SIGINT ends the turn the same way, then exits.
@@ -73,6 +74,7 @@ function fileOps(text) {
   for (const line of text.split("\n")) {
     const [op, ...rest] = line.split(" ");
     if (op === "WRITE") writeFileSync(rest[0], rest.slice(1).join(" ") + "\n");
+    if (op === "GIT") execFileSync("git", rest, { stdio: "ignore" });
     if (op === "COMMIT") {
       execFileSync("git", ["add", "-A"]);
       execFileSync("git", [

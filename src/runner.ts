@@ -143,7 +143,8 @@ class Runner {
   async run(): Promise<number> {
     this.state = readTask(this.id, this.env);
     this.files = taskFiles(this.id, this.env);
-    if (this.state.status === "cancelled" || this.state.status === "closed") {
+    const st = this.state.status;
+    if (st === "cancelled" || st === "closing" || st === "closed") {
       debugLog({ phase: "runner_start", task_id: this.id, skipped: this.state.status });
       return 0;
     }

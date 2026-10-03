@@ -148,7 +148,10 @@ $XDG_STATE_HOME/claudecode-mcp/          (default ~/.local/state/claudecode-mcp)
   main checkout are not included). `/.claude/worktrees/` is added to the
   repo's local `.git/info/exclude` so worktrees never show in `git status`.
   A `repo` that names a subfolder starts Claude in the same subfolder of the
-  worktree. A non-git `repo` is an error that suggests `in_place`.
+  worktree. A non-git `repo` is an error that suggests `in_place`. The repo's
+  top level must also be inside `allowed_roots` (the worktree mirrors the
+  whole repo). A linked worktree (for example another task's) cannot be the
+  `repo` of a worktree task, and a repo with no commits needs `in_place`.
 - `isolation: "in_place"` runs in the given directory with no worktree (for
   reviews or non-git folders).
 - Worktrees stay until `close_task`, because removing them breaks resume.
@@ -156,8 +159,11 @@ $XDG_STATE_HOME/claudecode-mcp/          (default ~/.local/state/claudecode-mcp)
   branch), `delete` (remove both; refuses if the branch has commits not in
   the repo's `HEAD` unless `force`), `push_pr` (`git push -u origin <branch>`,
   then `gh pr create --draft` if `gh` is available, else a note; then remove
-  the folder). Every action refuses uncommitted changes in the worktree
-  unless `force`. A closed task cannot be resumed.
+  the folder). Unless `force`, every action refuses uncommitted changes and
+  a worktree whose `HEAD` left the task branch (commits there would be
+  lost). It always refuses while other worktrees sit inside the task's
+  folder. Ignored files removed with the folder are listed in `notes`. A
+  closed task cannot be resumed.
 - `get_diff` compares the working tree with the base commit: commits, diff
   stat, untracked files (as new files), and the diff capped at 200 KiB.
   `in_place` tasks in a git repo record `HEAD` at start as their base, so
@@ -207,7 +213,11 @@ usage, `permission_denials`, and `total_cost_usd` (estimate only on a subscripti
 
 ### Task states
 
-`starting` → `running` ⇄ `idle` (turn done, waiting for messages) → `closed`.
+`starting` → `running` ⇄ `idle` (turn done, waiting for messages) →
+`closing` → `closed`. `closing` is set once `close_task`'s checks pass and
+before any slow step (push, folder removal), so the task can never be
+resumed into a folder that is going away; if a step fails, the task stays
+`closing` and `close_task` can be called again.
 Side states: `stalled` (no events for N min, still alive), `interrupted`
 (runner gone), `failed`, `rate_limited` (from `rate_limit_event` or an error;
 includes the reset time), `timed_out`, `cancelled`.

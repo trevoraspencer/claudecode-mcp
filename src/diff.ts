@@ -51,7 +51,11 @@ export async function taskDiff(
   };
   if (statOnly) return result;
 
-  const tracked = await run("git", ["diff", "--no-color", "--no-ext-diff", base, "--"], dir);
+  const tracked = await run(
+    "git",
+    ["diff", "--no-color", "--no-ext-diff", "--no-textconv", base, "--"],
+    dir,
+  );
   if (tracked.code !== 0 && !tracked.truncated) {
     throw new Error(`git diff failed: ${tracked.stderr.trim().slice(0, 500)}`);
   }
@@ -64,7 +68,20 @@ export async function taskDiff(
       break;
     }
     // Exit code 1 means "files differ", which is the expected case here.
-    const r = await run("git", ["diff", "--no-index", "--no-color", "--", "/dev/null", file], dir);
+    const r = await run(
+      "git",
+      [
+        "diff",
+        "--no-index",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--",
+        "/dev/null",
+        file,
+      ],
+      dir,
+    );
     parts.push(r.stdout);
     bytes += Buffer.byteLength(r.stdout, "utf8");
     if (r.truncated) cut = true;

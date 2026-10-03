@@ -78,6 +78,7 @@ const statusEnum = z.enum([
   "cancelled",
   "interrupted",
   "rate_limited",
+  "closing",
   "closed",
 ]);
 const recent = z.int().min(0).max(50).optional().describe("How many recent steps to include.");

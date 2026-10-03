@@ -150,7 +150,16 @@ Tests live in `test/` and import compiled modules from `dist/`.
 - git and gh run with argv arrays, a timeout, `GIT_TERMINAL_PROMPT=0`, and
   no `GIT_DIR`-style redirect variables. Caller refs are validated.
 - Never remove a worktree while its runner is alive, and never discard
-  uncommitted work or unmerged commits without `force`.
+  uncommitted work, unmerged commits, or commits off the task branch
+  without `force`. Never remove a folder that contains other worktrees.
+- `close_task` holds the launch lock and sets `closing` before any slow
+  step; `closing` and `closed` tasks are never resumed.
+- A worktree task's git top level must be inside `allowed_roots`, and it
+  must be a main checkout, not a linked worktree.
+- git/gh child processes run detached with stdin closed (no tty prompts) and
+  `GIT_SSH_COMMAND` defaulting to `ssh -o BatchMode=yes`. Diffs use
+  `--no-ext-diff --no-textconv`. Text sent to a remote (branch names, PR
+  titles and bodies) is redacted first.
 - Do not delete a task's worktree while the task can still be resumed:
   sessions are keyed by cwd.
 - On cancel, timeout, or cap, terminate the complete process group

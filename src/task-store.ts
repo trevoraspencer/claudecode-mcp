@@ -23,6 +23,7 @@ export type TaskStatus =
   | "cancelled"
   | "interrupted"
   | "rate_limited"
+  | "closing"
   | "closed";
 
 export type PermissionMode = "auto" | "bypassPermissions" | "plan";

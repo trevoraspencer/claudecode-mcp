@@ -3,8 +3,15 @@
  * timeout; nothing goes through a shell.
  */
 
-import { execFile } from "node:child_process";
-import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import {
+  appendFileSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+} from "node:fs";
 import { dirname, isAbsolute, join, relative } from "node:path";
 
 const GIT_TIMEOUT_MS = 30_000;
@@ -42,10 +49,16 @@ export interface RunResult {
 function toolEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const out: NodeJS.ProcessEnv = { ...env, GIT_TERMINAL_PROMPT: "0", GH_PROMPT_DISABLED: "1" };
   for (const key of GIT_REDIRECT_VARS) delete out[key];
+  // GIT_TERMINAL_PROMPT does not cover ssh, which prompts on /dev/tty.
+  if (!out.GIT_SSH_COMMAND) out.GIT_SSH_COMMAND = "ssh -o BatchMode=yes";
   return out;
 }
 
-/** Run a command; resolves with its exit code instead of throwing on non-zero. */
+/**
+ * Run a command; resolves with its exit code instead of throwing on non-zero.
+ * Rejects only if it cannot start (for example ENOENT) or times out. Output
+ * beyond the cap is cut and flagged `truncated`.
+ */
 export function run(
   cmd: string,
   args: readonly string[],
@@ -53,30 +66,72 @@ export function run(
   opts: { env?: NodeJS.ProcessEnv; timeoutMs?: number } = {},
 ): Promise<RunResult> {
   return new Promise((resolve, reject) => {
-    execFile(
-      cmd,
-      args,
-      {
-        cwd,
-        env: toolEnv(opts.env ?? process.env),
-        timeout: opts.timeoutMs ?? GIT_TIMEOUT_MS,
-        maxBuffer: MAX_BUFFER,
-        encoding: "utf8",
-      },
-      (err, stdout, stderr) => {
-        const code = (err as { code?: unknown } | null)?.code;
-        if (code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") {
-          resolve({ stdout, stderr, code: -1, truncated: true });
-          return;
-        }
-        if (err && typeof code !== "number") {
-          reject(err);
-          return;
-        }
-        resolve({ stdout, stderr, code: err ? Number((err as { code?: number }).code) : 0 });
-      },
-    );
+    const child = spawn(cmd, args, {
+      cwd,
+      env: toolEnv(opts.env ?? process.env),
+      // A new session has no controlling terminal and stdin is closed, so
+      // nothing (ssh, credential helpers, editors) can prompt the user.
+      detached: true,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const out: Buffer[] = [];
+    const errOut: Buffer[] = [];
+    let outBytes = 0;
+    let errBytes = 0;
+    let truncated = false;
+    child.stdout.on("data", (b: Buffer) => {
+      if (outBytes + b.length > MAX_BUFFER) {
+        truncated = true;
+        b = b.subarray(0, Math.max(0, MAX_BUFFER - outBytes));
+      }
+      outBytes += b.length;
+      if (b.length) out.push(b);
+      if (truncated) killTree(child.pid);
+    });
+    child.stderr.on("data", (b: Buffer) => {
+      if (errBytes < 64 * 1024) {
+        errOut.push(b);
+        errBytes += b.length;
+      }
+    });
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      killTree(child.pid);
+    }, opts.timeoutMs ?? GIT_TIMEOUT_MS);
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      const stdout = Buffer.concat(out).toString("utf8");
+      const stderr = Buffer.concat(errOut).toString("utf8");
+      if (timedOut) {
+        const err = new GitError(`${cmd} ${args[0] ?? ""} timed out`) as GitError & {
+          timedOut?: boolean;
+        };
+        err.timedOut = true;
+        reject(err);
+        return;
+      }
+      resolve({
+        stdout,
+        stderr,
+        code: truncated ? -1 : (code ?? -1),
+        ...(truncated ? { truncated } : {}),
+      });
+    });
   });
+}
+
+function killTree(pid: number | undefined): void {
+  if (!pid) return;
+  try {
+    process.kill(-pid, "SIGKILL");
+  } catch {
+    // already gone
+  }
 }
 
 /** Run git and return stdout; throw GitError on a non-zero exit. */
@@ -152,17 +207,37 @@ export interface NewWorktree {
   base_commit: string;
 }
 
+/** True if `top` is a linked worktree (for example another task's), not the main checkout. */
+export async function isLinkedWorktree(top: string): Promise<boolean> {
+  const out = await git(["rev-parse", "--absolute-git-dir", "--git-common-dir"], top);
+  const [gitDir, common] = out.trim().split("\n");
+  const commonAbs = common && isAbsolute(common) ? common : join(top, common ?? "");
+  return realpathSync.native(gitDir ?? "") !== realpathSync.native(commonAbs);
+}
+
 export async function createWorktree(opts: {
   repo: string;
+  /** Repo top level, already checked against allowed_roots by the caller. */
+  top: string;
   taskId: string;
   baseRef?: string;
   title: string;
 }): Promise<NewWorktree> {
-  const top = await repoTop(opts.repo);
-  if (!top) {
-    throw new GitError(`not a git repository: ${opts.repo}; pass isolation: "in_place"`);
+  const { top } = opts;
+  if (await isLinkedWorktree(top)) {
+    throw new GitError(
+      `${top} is a linked worktree (another task's?); start from the main checkout or pass isolation: "in_place"`,
+    );
   }
-  const base = await resolveCommit(top, opts.baseRef ?? "HEAD");
+  let base: string;
+  try {
+    base = await resolveCommit(top, opts.baseRef ?? "HEAD");
+  } catch (err) {
+    if (opts.baseRef) throw err;
+    throw new GitError(
+      `repo has no commits yet: ${top}; commit first or pass isolation: "in_place"`,
+    );
+  }
   const branch = `claude/${slugify(opts.title)}-${opts.taskId.slice(1, 7)}`;
   // A symlinked .claude or worktrees folder could put the worktree outside
   // the repo (and outside allowed_roots).
@@ -173,25 +248,67 @@ export async function createWorktree(opts: {
   }
   const worktree = join(top, ".claude", "worktrees", opts.taskId);
   await ensureWorktreeExclude(top);
-  await git(["worktree", "add", "-b", branch, worktree, base], top);
   const sub = relative(top, opts.repo);
-  return {
-    repo_root: top,
-    worktree,
-    workdir: sub ? join(worktree, sub) : worktree,
-    branch,
-    base_commit: base,
-  };
+  const workdir = sub ? join(worktree, sub) : worktree;
+  try {
+    // Checkout plus hooks can be slow on big repos.
+    await git(["worktree", "add", "-b", branch, worktree, base], top, { timeoutMs: 300_000 });
+    if (!existsSync(workdir)) {
+      throw new GitError(
+        `${sub} does not exist in the new worktree (untracked or ignored folder?); pass isolation: "in_place"`,
+      );
+    }
+  } catch (err) {
+    // Leave no half-made worktree or branch behind.
+    await run("git", ["worktree", "remove", "--force", worktree], top).catch(() => {});
+    await run("git", ["worktree", "prune"], top).catch(() => {});
+    await run("git", ["branch", "-D", branch], top).catch(() => {});
+    throw err;
+  }
+  return { repo_root: top, worktree, workdir, branch, base_commit: base };
+}
+
+/** Other worktrees located inside `dir` (they would be deleted with it). */
+export async function nestedWorktrees(repoRoot: string, dir: string): Promise<string[]> {
+  const out = await git(["worktree", "list", "--porcelain"], repoRoot);
+  const prefix = dir.endsWith("/") ? dir : dir + "/";
+  return out
+    .split("\n")
+    .filter((l) => l.startsWith("worktree "))
+    .map((l) => l.slice("worktree ".length))
+    .filter((p) => p.startsWith(prefix));
+}
+
+/** The branch checked out in `dir`, or null when HEAD is detached. */
+export async function currentBranch(dir: string): Promise<string | null> {
+  const r = await run("git", ["symbolic-ref", "-q", "HEAD"], dir);
+  const ref = r.stdout.trim();
+  return r.code === 0 && ref.startsWith("refs/heads/") ? ref.slice("refs/heads/".length) : null;
+}
+
+/** Ignored paths in `dir` (folders collapsed); they are deleted with the worktree. */
+export async function ignoredPaths(dir: string): Promise<string[]> {
+  const r = await run(
+    "git",
+    ["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"],
+    dir,
+  );
+  return r.code === 0 ? r.stdout.split("\0").filter(Boolean) : [];
 }
 
 export async function removeWorktree(repoRoot: string, worktree: string, force: boolean) {
   await git(["worktree", "remove", ...(force ? ["--force"] : []), worktree], repoRoot);
 }
 
-/** Paths with uncommitted changes (tracked or untracked) in `dir`. */
+/**
+ * Paths with uncommitted changes (tracked or untracked) in `dir`. Output too
+ * large to read counts as dirty.
+ */
 export async function dirtyFiles(dir: string): Promise<string[]> {
-  const out = await git(["status", "--porcelain", "-z", "--untracked-files=all"], dir);
-  const entries = out.split("\0");
+  const r = await run("git", ["status", "--porcelain", "-z", "--untracked-files=all"], dir);
+  if (r.truncated) return ["(more changes than git status output can hold)"];
+  if (r.code !== 0) throw new GitError(`git status failed: ${r.stderr.trim().slice(0, 500)}`);
+  const entries = r.stdout.split("\0");
   const files: string[] = [];
   for (let i = 0; i < entries.length; i++) {
     const entry = entries[i]!;
