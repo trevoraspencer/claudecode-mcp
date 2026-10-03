@@ -21,12 +21,15 @@
 //   INHERIT <file>     start a long-lived child that inherits stdout/stderr, write its
 //                      pid to <file>, then finish the turn
 //   IGNORE_INTERRUPT SILENT  as IGNORE_INTERRUPT, and exit on SIGINT without a result
+// Any line "WRITE <file> <text>" writes <text> to <file> (in cwd) and any line
+// "COMMIT <msg>" commits everything, and any line "GIT <args>" runs git with
+// those args, before the turn's other behavior.
 // anything else       finish at once with result "echo: <text>"
 // A control_request interrupt ends the turn with error_during_execution and
 // keeps the process. SIGINT ends the turn the same way, then exits.
 
 import { appendFileSync, writeFileSync } from "node:fs";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 
 const args = process.argv.slice(2);
@@ -67,8 +70,29 @@ const assistant = (text) =>
 let turn = null;
 let stdinEnded = false;
 
+function fileOps(text) {
+  for (const line of text.split("\n")) {
+    const [op, ...rest] = line.split(" ");
+    if (op === "WRITE") writeFileSync(rest[0], rest.slice(1).join(" ") + "\n");
+    if (op === "GIT") execFileSync("git", rest, { stdio: "ignore" });
+    if (op === "COMMIT") {
+      execFileSync("git", ["add", "-A"]);
+      execFileSync("git", [
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@t",
+        "commit",
+        "-qm",
+        rest.join(" "),
+      ]);
+    }
+  }
+}
+
 function startTurn(text) {
   out({ type: "system", subtype: "init", session_id: sessionId, permissionMode, model: "fake" });
+  fileOps(text);
   if (text.startsWith("CRASH")) {
     process.stderr.write("boom sk-ant-FAKESECRET123\n");
     process.exit(3);

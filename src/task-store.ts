@@ -23,6 +23,7 @@ export type TaskStatus =
   | "cancelled"
   | "interrupted"
   | "rate_limited"
+  | "closing"
   | "closed";
 
 export type PermissionMode = "auto" | "bypassPermissions" | "plan";
@@ -60,6 +61,20 @@ export interface TurnResult {
   permission_denials?: unknown[];
 }
 
+/** Where a task works. Worktree tasks get their own branch and folder. */
+export interface Workspace {
+  isolation: "worktree" | "in_place";
+  /** Top level of the git repo, if the task's folder is in one. */
+  repo_root?: string;
+  /** The task's worktree folder (worktree isolation only). */
+  worktree?: string;
+  branch?: string;
+  /** Commit the task started from; get_diff compares against it. */
+  base_commit?: string;
+  /** Short title for branch names and PRs. */
+  title?: string;
+}
+
 export interface TaskState {
   version: 1;
   id: string;
@@ -68,6 +83,7 @@ export interface TaskState {
   updated_at: string;
   status: TaskStatus;
   spec: TaskSpec;
+  workspace?: Workspace;
   session_id: string;
   /** True once `claude` has created the session; later starts use --resume. */
   session_started: boolean;
@@ -143,17 +159,21 @@ export interface NewTask {
   spec: TaskSpec;
   prompt: string;
   name?: string;
+  /** Use this id (from newTaskId) instead of a fresh one. */
+  id?: string;
+  workspace?: Workspace;
 }
 
 /** Create the task folder and its first task.json. The prompt becomes the first turn. */
 export function createTask(input: NewTask, env: NodeJS.ProcessEnv = process.env): TaskState {
   mkdirSync(tasksDir(env), { recursive: true, mode: 0o700 });
   for (let attempt = 0; ; attempt++) {
-    const id = newTaskId();
+    const id = input.id ?? newTaskId();
     try {
       mkdirSync(taskDir(id, env), { mode: 0o700 });
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === "EEXIST" && attempt < 5) continue;
+      const retry = !input.id && attempt < 5;
+      if ((err as NodeJS.ErrnoException).code === "EEXIST" && retry) continue;
       throw err;
     }
     const now = new Date().toISOString();
@@ -165,6 +185,7 @@ export function createTask(input: NewTask, env: NodeJS.ProcessEnv = process.env)
       updated_at: now,
       status: "starting",
       spec: input.spec,
+      ...(input.workspace ? { workspace: input.workspace } : {}),
       session_id: randomUUID(),
       session_started: false,
       pending_messages: [input.prompt],

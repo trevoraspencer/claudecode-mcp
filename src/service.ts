@@ -3,14 +3,29 @@
  * from task.json and the runners, so a restarted server sees the same tasks.
  */
 
-import { mkdtempSync, readdirSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { checkClaudeVersion } from "./claude-cli.js";
 import { cap, readEventsPage, recentSteps, type EventsPage, type Step } from "./compact.js";
+import { taskDiff, type DiffResult } from "./diff.js";
+import {
+  createWorktree,
+  currentBranch,
+  dirtyFiles,
+  ignoredPaths,
+  nestedWorktrees,
+  ghBin,
+  git,
+  removeWorktree,
+  repoTop,
+  run,
+  type NewWorktree,
+} from "./git.js";
 import type { Config } from "./config.js";
 import { assertDepthAllowsTasks } from "./depth.js";
 import {
+  RUNNER_CLOSED,
   assertSocketPathFits,
   buildSpec,
   hasLiveRunner,
@@ -23,22 +38,25 @@ import {
 } from "./launcher.js";
 import { errorLog } from "./log.js";
 import { expandHome, tasksDir } from "./paths.js";
+import { redactSecrets } from "./redaction.js";
 import { isInside, resolveRepo } from "./repo.js";
 import type { Delivery } from "./runner.js";
 import {
   createTask,
+  newTaskId,
   readTask,
   TASK_ID_RE,
   taskFiles,
   writeTask,
   type TaskState,
   type TaskStatus,
+  type Workspace,
 } from "./task-store.js";
 
 /** A turn is in progress (or about to be): waiting makes sense. */
 const BUSY = new Set<TaskStatus>(["starting", "running", "stalled"]);
 /** Finished for good unless a message resumes it. */
-const ENDED = new Set<TaskStatus>(["failed", "timed_out", "cancelled", "closed"]);
+const ENDED = new Set<TaskStatus>(["failed", "timed_out", "cancelled", "closing", "closed"]);
 
 export const WAIT_MAX_S = 50;
 export const ASK_MAX_S = 600;
@@ -81,6 +99,7 @@ export interface TaskView {
   rate_limit: unknown;
   error: string | null;
   recent: Step[];
+  workspace: Workspace;
   takeover: { command: string; note?: string };
 }
 
@@ -108,10 +127,21 @@ function effectiveStatus(s: TaskState): TaskStatus {
   return s.status;
 }
 
-/** The socket is gone or refuses: the runner is dead even if its PID was reused. */
+/**
+ * The runner is gone or going: its socket is missing, refuses, resets, or
+ * closes without an answer (it was shutting down, so it did not act on the
+ * request). Treat it as dead even if its PID was reused. Callers that then
+ * resume do so under the launch lock, which probes the socket again first.
+ */
 function deadSocket(err: unknown): boolean {
-  const code = (err as NodeJS.ErrnoException)?.code;
-  return code === "ENOENT" || code === "ECONNREFUSED";
+  const code = (err as { code?: unknown })?.code;
+  return (
+    code === "ENOENT" ||
+    code === "ECONNREFUSED" ||
+    code === "ECONNRESET" ||
+    code === "EPIPE" ||
+    code === RUNNER_CLOSED
+  );
 }
 
 /** Bound the parts of a result that can be large, and say so when cut. */
@@ -155,6 +185,8 @@ const sleep = (ms: number, signal?: AbortSignal) =>
 export interface StartInput {
   prompt: string;
   repo: string;
+  isolation?: "worktree" | "in_place";
+  base_ref?: string;
   profile?: string;
   model?: string;
   effort?: string;
@@ -172,6 +204,15 @@ export interface AskInput {
   effort?: string;
   timeout_s?: number;
   writable?: boolean;
+}
+
+export interface CloseResult {
+  task: TaskView;
+  removed?: string;
+  branch_deleted?: string;
+  pushed?: string;
+  pr_url?: string;
+  notes: string[];
 }
 
 export type Progress = (elapsedS: number, totalS: number, message: string) => void;
@@ -235,6 +276,7 @@ export class TaskService {
       rate_limit: s.rate_limit,
       error: s.error,
       recent: recentSteps(taskFiles(s.id, this.env).events, recent),
+      workspace: s.workspace ?? { isolation: "in_place" },
       takeover: {
         command: `cd ${shellQuote(s.spec.workdir)} && claude --resume ${s.session_id}`,
         ...(alive
@@ -248,13 +290,257 @@ export class TaskService {
 
   async startTask(input: StartInput): Promise<TaskView> {
     this.guard();
-    const workdir = resolveRepo(input.repo, this.config.allowed_roots);
+    const repo = resolveRepo(input.repo, this.config.allowed_roots);
+    const isolation = input.isolation ?? "worktree";
+    if (isolation === "in_place" && input.base_ref) {
+      throw new ToolError('base_ref needs isolation: "worktree"');
+    }
     assertSocketPathFits(this.env);
     await this.ensureCli();
-    const spec = buildSpec(this.config, { ...input, workdir } satisfies SpecInput);
-    const state = createTask({ spec, prompt: input.prompt, name: input.name }, this.env);
-    await withLaunchLock(state.id, this.env, () => launchRunner(state.id, this.env));
-    return this.view(state.id, 5);
+    const { prompt, name, isolation: _i, base_ref: _b, repo: _r, ...rest } = input;
+    const id = newTaskId();
+    // The title becomes a branch name and maybe a PR title: redact it.
+    const title = cap(redactSecrets(name ?? prompt.split("\n")[0] ?? "task"), 70);
+    let workspace: Workspace;
+    let wt: NewWorktree | undefined;
+    if (isolation === "worktree") {
+      const top = await repoTop(repo);
+      if (!top) throw new ToolError(`not a git repository: ${repo}; pass isolation: "in_place"`);
+      // The worktree mirrors the whole repo, so the repo's top level must be
+      // inside allowed_roots too (not just the folder the caller named).
+      const realTop = realpathSync.native(top);
+      if (
+        !this.config.allowed_roots.some(
+          (r) => existsSync(r) && isInside(realTop, realpathSync.native(r)),
+        )
+      ) {
+        throw new ToolError(
+          `the git repo containing ${repo} (${top}) is outside allowed_roots; pass isolation: "in_place"`,
+        );
+      }
+      wt = await createWorktree({ repo, top, taskId: id, baseRef: input.base_ref, title });
+      workspace = {
+        isolation,
+        repo_root: wt.repo_root,
+        worktree: wt.worktree,
+        branch: wt.branch,
+        base_commit: wt.base_commit,
+        title,
+      };
+    } else {
+      const top = await repoTop(repo);
+      // A repo with no commits yet has no base; get_diff then says so.
+      const head = top ? await run("git", ["rev-parse", "--verify", "-q", "HEAD"], top) : null;
+      workspace = top
+        ? {
+            isolation,
+            repo_root: top,
+            ...(head?.code === 0 ? { base_commit: head.stdout.trim() } : {}),
+            title,
+          }
+        : { isolation, title };
+    }
+    try {
+      const spec = buildSpec(this.config, {
+        ...rest,
+        workdir: wt?.workdir ?? repo,
+      } satisfies SpecInput);
+      createTask({ id, spec, prompt, name, workspace }, this.env);
+    } catch (err) {
+      // Nothing ran yet: do not leave an orphan worktree and branch behind.
+      if (wt) {
+        await removeWorktree(wt.repo_root, wt.worktree, true).catch(() => {});
+        await git(["branch", "-D", wt.branch], wt.repo_root).catch(() => {});
+      }
+      throw err;
+    }
+    await withLaunchLock(id, this.env, () => launchRunner(id, this.env));
+    return this.view(id, 5);
+  }
+
+  /** What the task changed since its base commit. */
+  async getDiff(id: string, statOnly: boolean): Promise<DiffResult> {
+    this.guard();
+    const s = this.read(id);
+    const ws = s.workspace;
+    const dir = ws?.worktree ?? ws?.repo_root;
+    if (!dir) throw new ToolError(`task ${id} is not in a git repo`);
+    if (!ws?.base_commit) {
+      throw new ToolError(`task ${id} has no base commit (its repo had no commits at start)`);
+    }
+    if (s.status === "closed" && ws.worktree) {
+      // The folder is gone; the branch still holds any commits.
+      throw new ToolError(`task ${id} is closed; its worktree was removed (branch ${ws.branch})`);
+    }
+    if (!existsSync(dir)) throw new ToolError(`task ${id}'s folder is missing: ${dir}`);
+    return taskDiff(dir, ws.base_commit, statOnly, ws.branch);
+  }
+
+  /**
+   * Finish a task: stop its runner, then keep the branch (remove the
+   * worktree folder), delete both, or push the branch and open a draft PR.
+   */
+  async closeTask(
+    id: string,
+    action: "keep_branch" | "delete" | "push_pr" = "keep_branch",
+    force = false,
+  ): Promise<CloseResult> {
+    this.guard();
+    this.read(id);
+    // Hold the launch lock throughout, so no message can resume the task
+    // (and start claude in the worktree) while it is being closed.
+    return withLaunchLock(id, this.env, () => this.closeLocked(id, action, force));
+  }
+
+  private async closeLocked(
+    id: string,
+    action: "keep_branch" | "delete" | "push_pr",
+    force: boolean,
+  ): Promise<CloseResult> {
+    const notes: string[] = [];
+    let s = this.read(id);
+    if (s.status === "closed") return { task: this.view(id, 0), notes: ["already closed"] };
+    const ws = s.workspace;
+    const wt = ws?.isolation === "worktree" ? ws : undefined;
+    if (!wt && action !== "keep_branch") {
+      throw new ToolError(`task ${id} has no worktree; only action "keep_branch" applies`);
+    }
+    if (runnerAlive(s)) {
+      try {
+        await requestRunner(id, { op: "cancel" }, this.env, 20_000);
+      } catch (err) {
+        if (!deadSocket(err)) throw err;
+        s = this.read(id);
+        s.runner = null;
+        s.claude_pid = null;
+        writeTask(s, this.env);
+      }
+    }
+    s = this.read(id);
+    if (runnerAlive(s)) throw new ToolError(`task ${id} is still running; try again`);
+    const out: Omit<CloseResult, "task" | "notes"> = {};
+    if (wt?.worktree && wt.repo_root && wt.branch) {
+      const { repo_root: root, worktree, branch } = wt;
+      // A worktree has a .git file; checking with git would also succeed
+      // from the parent repo if the folder were no longer a worktree.
+      const exists = existsSync(join(worktree, ".git"));
+      if (!exists) await run("git", ["worktree", "prune"], root).catch(() => {});
+
+      // ── checks first: nothing below may change state until they pass ──
+      if (exists) {
+        const nested = await nestedWorktrees(root, worktree);
+        if (nested.length > 0) {
+          throw new ToolError(
+            `task ${id}'s folder contains other worktrees (${nested.join(", ")}); close those tasks first`,
+          );
+        }
+        if (!force) {
+          const dirty = await dirtyFiles(worktree);
+          if (dirty.length > 0) {
+            throw new ToolError(
+              `task ${id} has uncommitted changes (${dirty.length} files: ${dirty.slice(0, 20).join(", ")}). ` +
+                "Ask Claude to commit them, or pass force: true to discard them.",
+            );
+          }
+          const head = await currentBranch(worktree);
+          if (head !== branch) {
+            throw new ToolError(
+              `task ${id}'s worktree is on ${head ? `branch ${head}` : "a detached HEAD"}, not ${branch}; ` +
+                "commits made there would be lost. Ask Claude to move them to the task branch, or pass force: true.",
+            );
+          }
+        }
+      }
+      if (action === "delete" && !force) {
+        const ahead = (await git(["rev-list", "--count", `HEAD..${branch}`], root)).trim();
+        if (ahead !== "0") {
+          throw new ToolError(
+            `branch ${branch} has ${ahead} commit(s) not in the repo's HEAD; ` +
+              "merge them, use keep_branch, or pass force: true to delete them",
+          );
+        }
+      }
+      const ignored = exists ? await ignoredPaths(worktree) : [];
+
+      // Mark the task as closing before any slow step, so it can never be
+      // resumed into a folder that is going away, even if a step fails.
+      s = this.read(id);
+      s.status = "closing";
+      writeTask(s, this.env);
+
+      if (action === "push_pr") {
+        try {
+          await git(["push", "-u", "origin", branch], exists ? worktree : root, {
+            env: this.env,
+            timeoutMs: 120_000,
+          });
+        } catch (err) {
+          throw new ToolError(
+            `push failed: ${(err as Error).message}. The task is "closing"; fix the remote and call close_task again.`,
+          );
+        }
+        out.pushed = branch;
+        const pr = await this.openDraftPr(s, branch, exists ? worktree : root);
+        if ("url" in pr) out.pr_url = pr.url;
+        else notes.push(pr.note);
+      }
+      if (exists) {
+        await removeWorktree(root, worktree, force);
+        out.removed = worktree;
+        if (ignored.length > 0) {
+          notes.push(
+            `removed ${ignored.length} ignored path(s) with the worktree: ${ignored.slice(0, 20).join(", ")}`,
+          );
+        }
+      }
+      if (action === "delete") {
+        await git(["branch", "-D", branch], root);
+        out.branch_deleted = branch;
+      }
+    }
+    s = this.read(id);
+    s.status = "closed";
+    writeTask(s, this.env);
+    return { task: this.view(id, 0), ...out, notes };
+  }
+
+  private async openDraftPr(
+    s: TaskState,
+    branch: string,
+    cwd: string,
+  ): Promise<{ url: string } | { note: string }> {
+    // Title and body go to the remote: redact them like any client output.
+    const secrets = Object.values(s.spec.profile.env);
+    const title = redactSecrets(
+      s.workspace?.title ?? s.name ?? `claudecode-mcp task ${s.id}`,
+      secrets,
+    );
+    const summary = s.result?.text
+      ? `\n\n${redactSecrets(cap(s.result.text, 5_000), secrets)}`
+      : "";
+    const body = `Opened by claudecode-mcp from task \`${s.id}\`.${summary}`;
+    let r;
+    try {
+      r = await run(
+        ghBin(this.env),
+        // --flag=value, so a title starting with "-" is never read as a flag.
+        ["pr", "create", "--draft", `--head=${branch}`, `--title=${title}`, `--body=${body}`],
+        cwd,
+        { env: this.env, timeoutMs: 60_000 },
+      );
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+        return { note: "gh is not installed; branch pushed, open the PR yourself" };
+      }
+      return {
+        note: `gh pr create did not finish (${(err as Error).message}); check for a PR before retrying`,
+      };
+    }
+    if (r.code !== 0) {
+      return { note: `gh pr create failed: ${(r.stderr || r.stdout).trim().slice(0, 300)}` };
+    }
+    const url = r.stdout.trim().split("\n").at(-1) ?? "";
+    return url ? { url } : { note: "gh did not print a PR URL" };
   }
 
   /** Wait until the task is no longer busy, up to `timeoutS`. */
@@ -290,7 +576,9 @@ export class TaskService {
     this.guard();
     for (let attempt = 0; attempt < 3; attempt++) {
       const s = this.read(id);
-      if (s.status === "closed") throw new ToolError(`task ${id} is closed`);
+      if (s.status === "closed" || s.status === "closing") {
+        throw new ToolError(`task ${id} is ${s.status}`);
+      }
       if (runnerAlive(s)) {
         try {
           const r = await requestRunner(id, { op: "message", text, interrupt }, this.env);

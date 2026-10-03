@@ -144,13 +144,30 @@ $XDG_STATE_HOME/claudecode-mcp/          (default ~/.local/state/claudecode-mcp)
 ### Worktrees
 
 - Default: `git worktree add <repo>/.claude/worktrees/<task-id> -b claude/<slug>-<short-id> <base_ref>`.
+  `base_ref` defaults to the repo's `HEAD` commit (uncommitted changes in the
+  main checkout are not included). `/.claude/worktrees/` is added to the
+  repo's local `.git/info/exclude` so worktrees never show in `git status`.
+  A `repo` that names a subfolder starts Claude in the same subfolder of the
+  worktree. A non-git `repo` is an error that suggests `in_place`. The repo's
+  top level must also be inside `allowed_roots` (the worktree mirrors the
+  whole repo). A linked worktree (for example another task's) cannot be the
+  `repo` of a worktree task, and a repo with no commits needs `in_place`.
 - `isolation: "in_place"` runs in the given directory with no worktree (for
   reviews or non-git folders).
 - Worktrees stay until `close_task`, because removing them breaks resume.
 - `close_task` options: `keep_branch` (default: remove the folder, keep the
-  branch), `delete` (remove both; refuses if there are unmerged commits unless
-  `force`), `push_pr` (push the branch and open a draft PR with `gh`, if
-  available).
+  branch), `delete` (remove both; refuses if the branch has commits not in
+  the repo's `HEAD` unless `force`), `push_pr` (`git push -u origin <branch>`,
+  then `gh pr create --draft` if `gh` is available, else a note; then remove
+  the folder). Unless `force`, every action refuses uncommitted changes and
+  a worktree whose `HEAD` left the task branch (commits there would be
+  lost). It always refuses while other worktrees sit inside the task's
+  folder. Ignored files removed with the folder are listed in `notes`. A
+  closed task cannot be resumed.
+- `get_diff` compares the working tree with the base commit: commits, diff
+  stat, untracked files (as new files), and the diff capped at 200 KiB.
+  `in_place` tasks in a git repo record `HEAD` at start as their base, so
+  their diff also includes any changes that were already uncommitted.
 - Idle tasks older than a configurable TTL (default 7 days) are listed as
   stale. They are never deleted automatically if they have uncommitted or
   unpushed work.
@@ -196,7 +213,11 @@ usage, `permission_denials`, and `total_cost_usd` (estimate only on a subscripti
 
 ### Task states
 
-`starting` → `running` ⇄ `idle` (turn done, waiting for messages) → `closed`.
+`starting` → `running` ⇄ `idle` (turn done, waiting for messages) →
+`closing` → `closed`. `closing` is set once `close_task`'s checks pass and
+before any slow step (push, folder removal), so the task can never be
+resumed into a folder that is going away; if a step fails, the task stays
+`closing` and `close_task` can be called again.
 Side states: `stalled` (no events for N min, still alive), `interrupted`
 (runner gone), `failed`, `rate_limited` (from `rate_limit_event` or an error;
 includes the reset time), `timed_out`, `cancelled`.
@@ -356,7 +377,11 @@ Release as **2.0.0** (breaking). Rewrite `AGENTS.md` invariants to match.
    **Done.** Decisions: `ask` without `repo` uses an empty temp folder;
    `ask` is read-only by default; `wait_task` max 50 s, `ask` max 600 s;
    `max_concurrent` is not enforced until step 6.
-4. Worktrees: `isolation: "worktree"`, `get_diff`, `close_task`.
+4. Worktrees: `isolation: "worktree"`, `get_diff`, `close_task`. **Done.**
+   Decisions: worktrees under `<repo>/.claude/worktrees/` with a local
+   exclude entry; non-git repos error (suggest `in_place`); `push_pr` pushes
+   and opens a draft PR with `gh` when available; closing refuses
+   uncommitted changes unless `force`.
 5. Profiles (section 6).
 6. Restart recovery, `interrupted` state, `max_concurrent` queue, rate-limit
    state.
@@ -375,7 +400,8 @@ Tests: offline tests use a fake `claude` that emits stream-json; live tests
    finish the turn or abort?~~ It finishes the turn, then exits (step 2 probe).
 3. Public release: check Anthropic's current terms for using a subscription
    login through third-party tools before publishing.
-4. Should `push_pr` use `gh`, or only push the branch?
+4. ~~Should `push_pr` use `gh`, or only push the branch?~~ Both: push, then
+   `gh pr create --draft` when `gh` is available (step 4).
 5. For a public release: `auto` may not be on every plan. Keep the
    init-event mode check and a clear error so users can pick another profile.
 6. In a trusted repo whose `.claude/settings.json` allows `Bash(*)`, does

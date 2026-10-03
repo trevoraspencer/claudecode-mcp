@@ -143,7 +143,7 @@ test("stdio: initialize, then tools/list returns the task tools", async () => {
   child.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
 
   const list = await request("tools/list", {});
-  assert.equal(list.result.tools.length, 8);
+  assert.equal(list.result.tools.length, 10);
 
   const call = await request("tools/call", { name: "nope", arguments: {} });
   assert.equal(call.result.isError, true);

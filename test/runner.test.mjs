@@ -155,8 +155,9 @@ test("after the idle window the runner exits; a new message resumes the session"
   const s = await runnerGone(ctx);
   assert.equal(s.status, "idle");
   assert.equal(s.claude_pid, null);
-  assert.equal(existsSync(taskFiles(ctx.id, ctx.env).socket), false);
-  assert.equal(existsSync(sessionLockPath(s.session_id, ctx.env)), false);
+  // runner: null is written just before the socket and lock are released.
+  await waitFor(() => !existsSync(taskFiles(ctx.id, ctx.env).socket), "socket removed");
+  await waitFor(() => !existsSync(sessionLockPath(s.session_id, ctx.env)), "lock released");
 
   await resumeTask(ctx.id, "second", ctx.env);
   await waitFor(() => ctx.task().result?.text === "echo: second", "resumed turn");
@@ -337,4 +338,14 @@ test("a prompt claude never accepted is kept for the next start", async (t) => {
   assert.equal(s.status, "failed");
   assert.match(s.error, /cannot start claude/);
   assert.deepEqual(s.pending_messages, ["keep me"]);
+});
+
+test("a runner started while the previous one is still releasing the lock waits for it", async (t) => {
+  const ctx = await start(t, "first");
+  await status(ctx, "idle");
+  // Cancel, then resume at once: the old runner may still hold the session lock.
+  await requestRunner(ctx.id, { op: "cancel" }, ctx.env, 15_000);
+  await resumeTask(ctx.id, "again", ctx.env);
+  await waitFor(() => ctx.task().result?.text === "echo: again", "resumed turn");
+  assert.notEqual(ctx.task().status, "failed");
 });

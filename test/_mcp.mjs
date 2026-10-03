@@ -1,6 +1,6 @@
 // Helpers: start the built server over stdio and call tools with JSON-RPC.
 
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,11 +9,25 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 export const CLI = join(HERE, "..", "dist", "cli.js");
 export const STUB = join(HERE, "_fake_claude.mjs");
 
-/** A short-path sandbox (unix socket limit) with config, state dir, and a repo. */
+/** Make `dir` a git repo with one commit (README.md). */
+export function initRepo(dir) {
+  const g = (...args) => execFileSync("git", args, { cwd: dir, stdio: "pipe" }).toString();
+  g("init", "-q", "-b", "main");
+  g("config", "user.name", "t");
+  g("config", "user.email", "t@t");
+  g("config", "commit.gpgsign", "false");
+  writeFileSync(join(dir, "README.md"), "hello\n");
+  g("add", "-A");
+  g("commit", "-qm", "init");
+  return g;
+}
+
+/** A short-path sandbox (unix socket limit) with config, state dir, and a git repo. */
 export function sandbox(config = {}, envExtra = {}) {
   const dir = mkdtempSync("/tmp/ccm-");
   const repo = join(dir, "repo");
   mkdirSync(repo);
+  const g = initRepo(repo);
   const configPath = join(dir, "config.json");
   writeFileSync(configPath, JSON.stringify({ allowed_roots: [dir], ...config }));
   const env = {
@@ -25,7 +39,7 @@ export function sandbox(config = {}, envExtra = {}) {
     CLAUDECODE_MCP_DEPTH: "",
     ...envExtra,
   };
-  return { dir, repo, env };
+  return { dir, repo, env, g };
 }
 
 export async function startServer(env) {

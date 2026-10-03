@@ -78,6 +78,7 @@ const statusEnum = z.enum([
   "cancelled",
   "interrupted",
   "rate_limited",
+  "closing",
   "closed",
 ]);
 const recent = z.int().min(0).max(50).optional().describe("How many recent steps to include.");
@@ -131,15 +132,21 @@ export function createServer(ctx: ServerContext): McpServer {
       title: "Start a Claude Code task",
       description:
         "Start Claude Code on a coding task in a repo and return at once with a task_id. " +
-        "Runs in the repo folder itself (isolation: in_place). Track it with get_task/wait_task, " +
-        "steer it with send_message, stop it with cancel_task.",
+        "By default the task gets its own git worktree and branch (claude/<slug>-<id>) from " +
+        "base_ref (default HEAD); isolation: in_place runs in the folder itself. Track it with " +
+        "get_task/wait_task, steer it with send_message, review with get_diff, finish with close_task.",
       inputSchema: {
         prompt: prompt.describe("The task for Claude."),
         repo: z.string().min(1).max(4096).describe("Absolute path inside allowed_roots."),
         isolation: z
-          .enum(["in_place"])
+          .enum(["worktree", "in_place"])
           .optional()
-          .describe("Only in_place for now; git worktrees come later."),
+          .describe("worktree (default, needs a git repo) or in_place."),
+        base_ref: z
+          .string()
+          .max(256)
+          .optional()
+          .describe("Branch, tag, or commit to start the worktree from (default HEAD)."),
         profile: z.string().max(64).optional().describe("Profile name from the server config."),
         model: model.optional(),
         effort: effort.optional(),
@@ -234,6 +241,48 @@ export function createServer(ctx: ServerContext): McpServer {
     },
     wrap("cancel_task", async (args: { task_id: string }) =>
       json(await tasks.cancelTask(args.task_id)),
+    ),
+  );
+
+  reg(
+    "get_diff",
+    {
+      title: "Diff a task's changes",
+      description:
+        "Commits, diff stat, untracked files, and the diff (capped at 200 KiB) since the task's " +
+        "base commit, including uncommitted changes.",
+      inputSchema: { task_id: taskId, stat_only: z.boolean().optional() },
+    },
+    wrap("get_diff", async (args: { task_id: string; stat_only?: boolean }) =>
+      json(await tasks.getDiff(args.task_id, args.stat_only === true)),
+    ),
+  );
+
+  reg(
+    "close_task",
+    {
+      title: "Close a task",
+      description:
+        "Stop the task and clean up. keep_branch (default): remove the worktree folder, keep the " +
+        "branch. delete: remove both (refuses unmerged commits unless force). push_pr: push the " +
+        "branch and open a draft PR with gh, then remove the folder. Refuses uncommitted changes " +
+        "unless force. A closed task cannot be resumed.",
+      inputSchema: {
+        task_id: taskId,
+        action: z.enum(["keep_branch", "delete", "push_pr"]).optional(),
+        force: z.boolean().optional(),
+      },
+    },
+    wrap(
+      "close_task",
+      async (args: {
+        task_id: string;
+        action?: "keep_branch" | "delete" | "push_pr";
+        force?: boolean;
+      }) =>
+        json(
+          await tasks.closeTask(args.task_id, args.action ?? "keep_branch", args.force === true),
+        ),
     ),
   );
 
