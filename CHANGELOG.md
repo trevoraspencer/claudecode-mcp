@@ -46,6 +46,12 @@ v2 rebuild in progress (see `docs/DESIGN-v2.md`). Will ship as 2.0.0.
   blocked file tools; temp folder when no repo; progress notifications).
   Repos must be inside `allowed_roots`. `get_task` includes a ready
   `claude --resume` take-over command.
+- Worktree isolation (default for `start_task`): each task gets
+  `<repo>/.claude/worktrees/<id>` on branch `claude/<slug>-<id>` from
+  `base_ref` (default `HEAD`), excluded from `git status` via
+  `.git/info/exclude`. New tools `get_diff` (commits, stat, untracked files,
+  capped diff) and `close_task` (`keep_branch`, `delete`, `push_pr` with a
+  `gh` draft PR; refuses uncommitted work unless `force`).
 
 ### Removed
 

@@ -35,12 +35,14 @@ async function waitIdle(s, id, check = () => true) {
   throw new Error("task never settled");
 }
 
-test("tools/list shows the eight task tools", async (t) => {
+test("tools/list shows the task tools", async (t) => {
   const s = await server(t);
   const list = await s.request("tools/list", {});
   assert.deepEqual(list.result.tools.map((x) => x.name).sort(), [
     "ask",
     "cancel_task",
+    "close_task",
+    "get_diff",
     "get_events",
     "get_task",
     "list_tasks",
@@ -56,7 +58,8 @@ test("start_task, wait_task, get_task: one turn end to end", async (t) => {
   assert.equal(start.isError, false, start.text);
   const id = start.json.task_id;
   assert.match(id, /^t[0-9a-z]{10}$/);
-  assert.equal(start.json.workdir.endsWith("/repo"), true);
+  assert.match(start.json.workdir, /\/repo\/\.claude\/worktrees\/t[0-9a-z]{10}$/);
+  assert.equal(start.json.workspace.isolation, "worktree");
   const done = await waitIdle(s, id);
   assert.equal(done.status, "idle");
   assert.equal(done.result.text, "echo: hello");
@@ -65,7 +68,10 @@ test("start_task, wait_task, get_task: one turn end to end", async (t) => {
     done.recent.map((x) => x.kind),
     ["turn_start", "text", "result"],
   );
-  assert.match(done.takeover.command, /^cd '.*\/repo' && claude --resume [0-9a-f-]{36}$/);
+  assert.match(
+    done.takeover.command,
+    /^cd '.*\/worktrees\/t[0-9a-z]{10}' && claude --resume [0-9a-f-]{36}$/,
+  );
   assert.ok(done.takeover.note, "runner alive: take-over note present");
   const got = await s.call("get_task", { task_id: id, recent: 1 });
   assert.equal(got.json.recent.length, 1);
@@ -82,7 +88,7 @@ test("start_task refuses repos outside allowed_roots and unknown profiles", asyn
   assert.match(relative.text, /absolute/);
   const profile = await s.call("start_task", { prompt: "x", repo: s.repo, profile: "nope" });
   assert.match(profile.text, /unknown profile/);
-  const bad = await s.call("start_task", { prompt: "x", repo: s.repo, isolation: "worktree" });
+  const bad = await s.call("start_task", { prompt: "x", repo: s.repo, isolation: "elsewhere" });
   assert.equal(bad.isError, true);
 });
 

@@ -60,3 +60,44 @@ test("live: read-only ask over MCP with haiku", { skip: !live, timeout: 180_000 
     srv.stop();
   }
 });
+
+test(
+  "live: worktree task writes a file, get_diff sees it, close cleans up",
+  { skip: !live, timeout: 240_000 },
+  async () => {
+    const { sandbox, startServer } = await import("./_mcp.mjs");
+    const { existsSync } = await import("node:fs");
+    const box = sandbox();
+    delete box.env.CLAUDECODE_MCP_CLAUDE_BIN;
+    const srv = await startServer(box.env);
+    try {
+      const start = await srv.call("start_task", {
+        prompt:
+          "Create a file named hello.txt containing exactly the word hi. Do not commit. Reply done.",
+        repo: box.repo,
+        model: "sonnet",
+        effort: "low",
+      });
+      assert.equal(start.isError, false, start.text);
+      const id = start.json.task_id;
+      let v;
+      for (let i = 0; i < 40; i++) {
+        v = (await srv.call("wait_task", { task_id: id, timeout_s: 5 })).json;
+        if (!v.wait_timed_out) break;
+      }
+      assert.equal(v.status, "idle", v.error ?? "");
+      const diff = await srv.call("get_diff", { task_id: id });
+      assert.deepEqual(diff.json.untracked, ["hello.txt"]);
+      assert.equal(existsSync(`${box.repo}/hello.txt`), false);
+      const closed = await srv.call(
+        "close_task",
+        { task_id: id, action: "delete", force: true },
+        { timeoutMs: 30_000 },
+      );
+      assert.equal(closed.isError, false, closed.text);
+      assert.equal(existsSync(v.workspace.worktree), false);
+    } finally {
+      srv.stop();
+    }
+  },
+);

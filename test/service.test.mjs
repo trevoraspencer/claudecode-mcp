@@ -12,6 +12,7 @@ import { ensureStateDir } from "../dist/paths.js";
 import { TaskService } from "../dist/service.js";
 import { pidAlive } from "../dist/session-lock.js";
 import { createTask, readTask, writeTask } from "../dist/task-store.js";
+import { initRepo } from "./_mcp.mjs";
 
 const STUB = join(dirname(fileURLToPath(import.meta.url)), "_fake_claude.mjs");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -20,6 +21,7 @@ function setup(t, envExtra = {}) {
   const dir = mkdtempSync("/tmp/ccm-");
   const repo = join(dir, "repo");
   mkdirSync(repo);
+  initRepo(repo);
   const env = {
     ...process.env,
     CLAUDECODE_MCP_STATE_DIR: join(dir, "s"),

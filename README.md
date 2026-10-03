@@ -11,7 +11,7 @@ Stateless, spawn-per-call.
 > tools below have been removed from `main`; this README describes the 1.x
 > releases on npm until the v2 docs land. v2 needs Node 22+ on macOS or Linux.
 > Current v2 tools: `start_task`, `get_task`, `wait_task`, `get_events`,
-> `send_message`, `cancel_task`, `list_tasks`, `ask`.
+> `send_message`, `get_diff`, `cancel_task`, `close_task`, `list_tasks`, `ask`.
 
 ## Tools
 

@@ -3,11 +3,22 @@
  * from task.json and the runners, so a restarted server sees the same tasks.
  */
 
-import { mkdtempSync, readdirSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { checkClaudeVersion } from "./claude-cli.js";
 import { cap, readEventsPage, recentSteps, type EventsPage, type Step } from "./compact.js";
+import { taskDiff, type DiffResult } from "./diff.js";
+import {
+  createWorktree,
+  dirtyFiles,
+  ghBin,
+  git,
+  removeWorktree,
+  repoTop,
+  run,
+  type NewWorktree,
+} from "./git.js";
 import type { Config } from "./config.js";
 import { assertDepthAllowsTasks } from "./depth.js";
 import {
@@ -27,12 +38,14 @@ import { isInside, resolveRepo } from "./repo.js";
 import type { Delivery } from "./runner.js";
 import {
   createTask,
+  newTaskId,
   readTask,
   TASK_ID_RE,
   taskFiles,
   writeTask,
   type TaskState,
   type TaskStatus,
+  type Workspace,
 } from "./task-store.js";
 
 /** A turn is in progress (or about to be): waiting makes sense. */
@@ -81,6 +94,7 @@ export interface TaskView {
   rate_limit: unknown;
   error: string | null;
   recent: Step[];
+  workspace: Workspace;
   takeover: { command: string; note?: string };
 }
 
@@ -155,6 +169,8 @@ const sleep = (ms: number, signal?: AbortSignal) =>
 export interface StartInput {
   prompt: string;
   repo: string;
+  isolation?: "worktree" | "in_place";
+  base_ref?: string;
   profile?: string;
   model?: string;
   effort?: string;
@@ -235,6 +251,7 @@ export class TaskService {
       rate_limit: s.rate_limit,
       error: s.error,
       recent: recentSteps(taskFiles(s.id, this.env).events, recent),
+      workspace: s.workspace ?? { isolation: "in_place" },
       takeover: {
         command: `cd ${shellQuote(s.spec.workdir)} && claude --resume ${s.session_id}`,
         ...(alive
@@ -248,13 +265,208 @@ export class TaskService {
 
   async startTask(input: StartInput): Promise<TaskView> {
     this.guard();
-    const workdir = resolveRepo(input.repo, this.config.allowed_roots);
+    const repo = resolveRepo(input.repo, this.config.allowed_roots);
+    const isolation = input.isolation ?? "worktree";
+    if (isolation === "in_place" && input.base_ref) {
+      throw new ToolError('base_ref needs isolation: "worktree"');
+    }
     assertSocketPathFits(this.env);
     await this.ensureCli();
-    const spec = buildSpec(this.config, { ...input, workdir } satisfies SpecInput);
-    const state = createTask({ spec, prompt: input.prompt, name: input.name }, this.env);
-    await withLaunchLock(state.id, this.env, () => launchRunner(state.id, this.env));
-    return this.view(state.id, 5);
+    const { prompt, name, isolation: _i, base_ref: _b, repo: _r, ...rest } = input;
+    const id = newTaskId();
+    const title = cap(name ?? prompt.split("\n")[0] ?? "task", 70);
+    let workspace: Workspace;
+    let wt: NewWorktree | undefined;
+    if (isolation === "worktree") {
+      wt = await createWorktree({ repo, taskId: id, baseRef: input.base_ref, title });
+      workspace = {
+        isolation,
+        repo_root: wt.repo_root,
+        worktree: wt.worktree,
+        branch: wt.branch,
+        base_commit: wt.base_commit,
+        title,
+      };
+    } else {
+      const top = await repoTop(repo);
+      workspace = top
+        ? {
+            isolation,
+            repo_root: top,
+            base_commit: (await git(["rev-parse", "HEAD"], top)).trim(),
+            title,
+          }
+        : { isolation, title };
+    }
+    try {
+      const spec = buildSpec(this.config, {
+        ...rest,
+        workdir: wt?.workdir ?? repo,
+      } satisfies SpecInput);
+      createTask({ id, spec, prompt, name, workspace }, this.env);
+    } catch (err) {
+      // Nothing ran yet: do not leave an orphan worktree and branch behind.
+      if (wt) {
+        await removeWorktree(wt.repo_root, wt.worktree, true).catch(() => {});
+        await git(["branch", "-D", wt.branch], wt.repo_root).catch(() => {});
+      }
+      throw err;
+    }
+    await withLaunchLock(id, this.env, () => launchRunner(id, this.env));
+    return this.view(id, 5);
+  }
+
+  /** What the task changed since its base commit. */
+  async getDiff(id: string, statOnly: boolean): Promise<DiffResult> {
+    this.guard();
+    const s = this.read(id);
+    const ws = s.workspace;
+    const dir = ws?.worktree ?? ws?.repo_root;
+    if (!ws?.base_commit || !dir) throw new ToolError(`task ${id} is not in a git repo`);
+    if (s.status === "closed" && ws.worktree) {
+      // The folder is gone; the branch still holds any commits.
+      throw new ToolError(`task ${id} is closed; its worktree was removed (branch ${ws.branch})`);
+    }
+    if (!existsSync(dir)) throw new ToolError(`task ${id}'s folder is missing: ${dir}`);
+    return taskDiff(dir, ws.base_commit, statOnly, ws.branch);
+  }
+
+  /**
+   * Finish a task: stop its runner, then keep the branch (remove the
+   * worktree folder), delete both, or push the branch and open a draft PR.
+   */
+  async closeTask(
+    id: string,
+    action: "keep_branch" | "delete" | "push_pr" = "keep_branch",
+    force = false,
+  ): Promise<{
+    task: TaskView;
+    removed?: string;
+    branch_deleted?: string;
+    pushed?: string;
+    pr_url?: string;
+    notes: string[];
+  }> {
+    this.guard();
+    this.read(id);
+    // Hold the launch lock throughout, so no message can resume the task
+    // (and start claude in the worktree) while it is being closed.
+    return withLaunchLock(id, this.env, () => this.closeLocked(id, action, force));
+  }
+
+  private async closeLocked(
+    id: string,
+    action: "keep_branch" | "delete" | "push_pr",
+    force: boolean,
+  ): Promise<{
+    task: TaskView;
+    removed?: string;
+    branch_deleted?: string;
+    pushed?: string;
+    pr_url?: string;
+    notes: string[];
+  }> {
+    const notes: string[] = [];
+    let s = this.read(id);
+    if (s.status === "closed") return { task: this.view(id, 0), notes: ["already closed"] };
+    const ws = s.workspace;
+    const wt = ws?.isolation === "worktree" ? ws : undefined;
+    if (!wt && action !== "keep_branch") {
+      throw new ToolError(`task ${id} has no worktree; only action "keep_branch" applies`);
+    }
+    if (runnerAlive(s)) {
+      try {
+        await requestRunner(id, { op: "cancel" }, this.env, 20_000);
+      } catch (err) {
+        if (!deadSocket(err)) throw err;
+        s = this.read(id);
+        s.runner = null;
+        s.claude_pid = null;
+        writeTask(s, this.env);
+      }
+    }
+    s = this.read(id);
+    if (runnerAlive(s)) throw new ToolError(`task ${id} is still running; try again`);
+    const out: { removed?: string; branch_deleted?: string; pushed?: string; pr_url?: string } = {};
+    if (wt?.worktree && wt.repo_root && wt.branch) {
+      const { repo_root: root, worktree, branch } = wt;
+      // A worktree has a .git file; checking with git would also succeed
+      // from the parent repo if the folder were no longer a worktree.
+      const exists = existsSync(join(worktree, ".git"));
+      if (!exists) await git(["worktree", "prune"], root).catch(() => {});
+      if (exists) {
+        const dirty = await dirtyFiles(worktree);
+        if (dirty.length > 0 && !force) {
+          throw new ToolError(
+            `task ${id} has uncommitted changes (${dirty.length} files: ${dirty.slice(0, 20).join(", ")}). ` +
+              "Ask Claude to commit them, or pass force: true to discard them.",
+          );
+        }
+      }
+      if (action === "delete" && !force) {
+        const ahead = (await git(["rev-list", "--count", `HEAD..${branch}`], root)).trim();
+        if (ahead !== "0") {
+          throw new ToolError(
+            `branch ${branch} has ${ahead} commit(s) not in the repo's HEAD; ` +
+              "merge them, use keep_branch, or pass force: true to delete them",
+          );
+        }
+      }
+      if (action === "push_pr") {
+        try {
+          await git(["push", "-u", "origin", branch], exists ? worktree : root, {
+            env: this.env,
+            timeoutMs: 120_000,
+          });
+        } catch (err) {
+          throw new ToolError(`push failed: ${(err as Error).message}`);
+        }
+        out.pushed = branch;
+        const pr = await this.openDraftPr(s, branch, exists ? worktree : root).catch(
+          (err: Error) => ({ note: `draft PR not opened: ${err.message}` }),
+        );
+        if ("url" in pr) out.pr_url = pr.url;
+        else notes.push(pr.note);
+      }
+      if (exists) {
+        await removeWorktree(root, worktree, force);
+        out.removed = worktree;
+      }
+      if (action === "delete") {
+        await git(["branch", "-D", branch], root);
+        out.branch_deleted = branch;
+      }
+    }
+    s = this.read(id);
+    s.status = "closed";
+    writeTask(s, this.env);
+    return { task: this.view(id, 0), ...out, notes };
+  }
+
+  private async openDraftPr(
+    s: TaskState,
+    branch: string,
+    cwd: string,
+  ): Promise<{ url: string } | { note: string }> {
+    const title = s.workspace?.title ?? s.name ?? `claudecode-mcp task ${s.id}`;
+    const summary = s.result?.text ? `\n\n${cap(s.result.text, 5_000)}` : "";
+    const body = `Opened by claudecode-mcp from task \`${s.id}\`.${summary}`;
+    let r;
+    try {
+      r = await run(
+        ghBin(this.env),
+        // --flag=value, so a title starting with "-" is never read as a flag.
+        ["pr", "create", "--draft", `--head=${branch}`, `--title=${title}`, `--body=${body}`],
+        cwd,
+        { env: this.env, timeoutMs: 60_000 },
+      );
+    } catch {
+      return { note: "gh is not installed; branch pushed, open the PR yourself" };
+    }
+    if (r.code !== 0)
+      return { note: `gh pr create failed: ${(r.stderr || r.stdout).trim().slice(0, 300)}` };
+    const url = r.stdout.trim().split("\n").at(-1) ?? "";
+    return url ? { url } : { note: "gh did not print a PR URL" };
   }
 
   /** Wait until the task is no longer busy, up to `timeoutS`. */

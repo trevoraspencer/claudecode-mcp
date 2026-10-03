@@ -13,10 +13,11 @@ changing behavior. v2 is built in steps (design section 10), one PR per step.
 v1 (one-shot `claude_prompt*` tools) was removed in step 1 and lives on in the
 1.x releases on npm.
 
-Build status: steps 1-3 are done (skeleton, runner, core MCP tools). The
-server exposes `start_task` (in_place only), `get_task`, `wait_task`,
-`get_events`, `send_message`, `cancel_task`, `list_tasks`, and `ask`.
-Worktrees, `get_diff`, and `close_task` arrive in step 4.
+Build status: steps 1-4 are done (skeleton, runner, core MCP tools,
+worktrees). The server exposes `start_task` (worktree by default, or
+in_place), `get_task`, `wait_task`, `get_events`, `send_message`,
+`get_diff`, `cancel_task`, `close_task`, `list_tasks`, and `ask`. Profiles
+(step 5) and restart recovery / queueing (step 6) are next.
 
 ## Core commands
 
@@ -69,6 +70,8 @@ runs `npm pack --dry-run`.
 - `src/service.ts` - the task operations behind the tools (`TaskService`).
 - `src/compact.ts` - compact steps and event pages from events.jsonl.
 - `src/repo.ts` - `repo` path checks against `allowed_roots` (realpath).
+- `src/git.ts` - git/gh helpers: worktree create/remove, refs, dirty files.
+- `src/diff.ts` - `get_diff` (commits, stat, untracked, capped diff).
 - `src/config.ts` - config and profile schema (zod), `loadConfig`,
   `resolveProfile`.
 - `src/paths.ts` - config path, state dir, `ensureStateDir`.
@@ -144,6 +147,10 @@ Tests live in `test/` and import compiled modules from `dist/`.
   tools). Without `repo` it runs in a fresh temp folder that is removed
   afterwards.
 - `wait_task` never blocks longer than 50 s; `ask` never longer than 600 s.
+- git and gh run with argv arrays, a timeout, `GIT_TERMINAL_PROMPT=0`, and
+  no `GIT_DIR`-style redirect variables. Caller refs are validated.
+- Never remove a worktree while its runner is alive, and never discard
+  uncommitted work or unmerged commits without `force`.
 - Do not delete a task's worktree while the task can still be resumed:
   sessions are keyed by cwd.
 - On cancel, timeout, or cap, terminate the complete process group
