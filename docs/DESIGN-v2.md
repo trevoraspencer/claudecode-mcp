@@ -1,6 +1,6 @@
 # claudecode-mcp v2 — design
 
-Status: **draft for review**. No code changes yet.
+Status: **approved**. Build in progress (see section 10).
 
 ## 1. Goal
 
@@ -309,7 +309,9 @@ Release as **2.0.0** (breaking). Rewrite `AGENTS.md` invariants to match.
 ## 10. Build plan (one PR each)
 
 1. Skeleton: config loading, state dir, env allowlist port, depth guard,
-   Node 22+, CI update.
+   Node 22+, CI update. **Done.** Decisions: v1 removed in this step; config
+   validated with `zod` (strict, unknown keys fail); `allowed_roots` defaults
+   to the home dir; CI on Node 22 and 24.
 2. Runner: spawn `claude -p` stream-json, events file, socket, interrupt,
    cancel, caps, stall check.
 3. Core tools: `start_task` (`in_place` only), `get_task`, `wait_task`,
@@ -321,7 +323,8 @@ Release as **2.0.0** (breaking). Rewrite `AGENTS.md` invariants to match.
 7. Docs, live tests, 2.0.0 release prep.
 
 Tests: offline tests use a fake `claude` that emits stream-json; live tests
-(opt-in) use `haiku` with tiny prompts.
+(opt-in) use tiny prompts: `sonnet` for anything that needs `auto` mode,
+`haiku` otherwise.
 
 ## 11. Open questions
 

@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+v2 rebuild in progress (see `docs/DESIGN-v2.md`). Will ship as 2.0.0.
+
+### Changed (breaking)
+
+- `main` is now the v2 skeleton. The server starts, loads config, and prepares
+  its state dir, but exposes no tools until the task tools land.
+- Requires Node 22 or newer. Supports macOS and Linux only.
+- The `claudecode-mcp` executable is now `dist/cli.js`.
+- `CLAUDECODE` can no longer be forwarded with
+  `CLAUDECODE_MCP_FORWARD_DANGEROUS=1`. Host-session variables such as
+  `CLAUDECODE`, `CLAUDE_AUTO_BACKGROUND_TASKS`, and `CLAUDE_CODE_SESSION_ID`
+  are never passed to the child.
+
+### Added
+
+- Config file at `~/.config/claudecode-mcp/config.json` (XDG aware; override
+  with `CLAUDECODE_MCP_CONFIG`) with limits, `allowed_roots`, and profiles.
+  Validation is strict: unknown keys or invalid values stop the server at
+  startup. Without a file, a default `worker` profile is used.
+- Private state dir at `~/.local/state/claudecode-mcp` (XDG aware; override
+  with `CLAUDECODE_MCP_STATE_DIR`).
+- Recursion guard via `CLAUDECODE_MCP_DEPTH`.
+- Minimum `claude` CLI version check (2.1.287).
+- `zod` is now a declared runtime dependency (already required by the MCP SDK).
+
+### Removed
+
+- v1 tools `claude_prompt`, `claude_prompt_with_context`, and
+  `claude_prompt_structured`, with the file-context path guard, loose JSON
+  recovery, the `--help` flag probe, Windows command-line handling,
+  `CLAUDECODE_MCP_BARE`, `skill.sh`, and `examples/`.
+- Node 20 from CI.
+
 ### Fixed
 
 - Refreshed the lockfile to pick up patched transitive dependencies

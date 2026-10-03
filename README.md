@@ -6,6 +6,11 @@
 Local stdio MCP server that wraps the headless Claude Code CLI as MCP tools.
 Stateless, spawn-per-call.
 
+> **Status: v2 rebuild in progress on `main`.** v2 turns this server into an
+> async task runner (see [`docs/DESIGN-v2.md`](docs/DESIGN-v2.md)). The v1
+> tools below have been removed from `main`; this README describes the 1.x
+> releases on npm until the v2 docs land. v2 needs Node 22+ on macOS or Linux.
+
 ## Tools
 
 - `claude_prompt { prompt, model?, system_prompt? }`

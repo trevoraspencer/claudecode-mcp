@@ -4,27 +4,39 @@ Canonical public guide for AI agents and contributors working in this repository
 
 ## Project purpose
 
-`claudecode-mcp` is a stateless stdio MCP server that wraps the headless
-`claude` CLI. It exposes one-shot MCP tools for prompts, prompts with local
-file context, and schema-constrained structured output.
+`claudecode-mcp` v2 is a stdio MCP server that runs Claude Code as an **async
+task runner**. Any MCP client can hand coding work or a review to Claude Code,
+track progress, steer it, and collect the result.
 
-The server is intentionally narrow: every tool call spawns a fresh `claude`
-subprocess, uses the server process's current working directory, and avoids
-session tracking or resume behavior.
+`docs/DESIGN-v2.md` is the source of truth for the v2 design. Read it before
+changing behavior. v2 is built in steps (design section 10), one PR per step.
+v1 (one-shot `claude_prompt*` tools) was removed in step 1 and lives on in the
+1.x releases on npm.
+
+Build status: step 1 (skeleton) is done. The server starts, loads config,
+and prepares the state dir. It exposes no tools until step 3.
 
 ## Core commands
 
 - `npm install` - install dependencies.
-- `npm run build` - compile TypeScript into `dist/` and make `dist/server.js`
+- `npm run build` - compile TypeScript into `dist/` and make `dist/cli.js`
   executable.
 - `npm test` - run the offline test suite. The `pretest` hook builds first.
 - `npm run test:live` - run tests with `CLAUDECODE_MCP_LIVE=1`; requires a
   real authenticated `claude` CLI on `PATH`.
-- `npm run format:check` - check Prettier formatting for `src/**/*.ts` and
+- `npm run format:check` / `npm run format` - Prettier for `src/**/*.ts` and
   `test/**/*.mjs`.
-- `npm run format` - format `src/**/*.ts` and `test/**/*.mjs`.
 
-Single tests can be run with Node's test runner after building, for example:
+Before pushing, run:
+
+```sh
+npm run format:check
+npx tsc --noEmit -p tsconfig.json
+npm test
+npm audit --omit=dev --audit-level=high
+```
+
+Single tests can be run after building:
 
 ```sh
 npm run build
@@ -33,112 +45,103 @@ node --test --test-name-pattern='<regex>' test/<file>.test.mjs
 
 ## CI expectations
 
-GitHub Actions validates pushes and pull requests on Node 20 and 22. The
-required CI workflow runs:
-
-- `npm ci`
-- `npm run format:check`
-- `npx tsc --noEmit -p tsconfig.json`
-- `npm run build`
-- `npm test`
-- `npm audit --omit=dev --audit-level=high` (blocking)
-- `npm audit --audit-level=high` (advisory for development-only transitives)
-
-Manual compatibility coverage can be run on demand. Release validation follows
-the required checks on Node 20 and 22 and also runs `npm pack --dry-run`.
+GitHub Actions runs the required workflow on Node 22 and 24 (ubuntu):
+`npm ci`, format check, typecheck, build, offline tests, a blocking
+production `npm audit --omit=dev --audit-level=high`, and an advisory full
+audit. The manual compatibility workflow adds macOS. Release validation also
+runs `npm pack --dry-run`.
 
 ## Architecture map
 
-- `src/server.ts` - MCP server wiring, tool schemas, request dispatch,
-  `baseClaudeArgs()`, and compatibility exports used by tests.
-- `src/invoke.ts` - child process spawning, explicit environment allowlist,
-  timeout and output caps, JSON parsing, and structured debug logging.
-- `src/path-guard.ts` - path containment and file reads for
-  `claude_prompt_with_context`.
-- `src/validators.ts` - MCP tool input validation and lightweight schema sanity
-  checks.
-- `src/redaction.ts` - secret redaction, client-safe error formatting, and
-  Claude exit error classification.
-- `src/flag-probe.ts` - lazy `claude --help` probing for `--json-schema`
-  support, with a short per-binary cache.
-- `src/env.ts` - shared environment-variable parsing helpers.
+- `src/cli.ts` - package entry (`bin`). No args starts the MCP server;
+  `runner <task-id>` is reserved for the runner (step 2). Refuses Node < 22
+  and Windows.
+- `src/server.ts` - stdio MCP server: startup (`prepare`), server factory.
+- `src/config.ts` - config and profile schema (zod), `loadConfig`,
+  `resolveProfile`.
+- `src/paths.ts` - config path, state dir, `ensureStateDir`.
+- `src/child-env.ts` - the `claude` child's environment allowlist.
+- `src/depth.ts` - recursion guard (`CLAUDECODE_MCP_DEPTH`).
+- `src/claude-cli.ts` - `claude` binary lookup and minimum version check.
+- `src/redaction.ts` - secret redaction and client-safe error text.
+- `src/log.ts` - structured stderr logging.
+- `src/env.ts` - bounded integer env parsing.
 
 Tests live in `test/` and import compiled modules from `dist/`.
+`test/_fake_claude.mjs` is the fake CLI for offline tests.
+
+## Files and locations
+
+- Config: `$XDG_CONFIG_HOME/claudecode-mcp/config.json` (default
+  `~/.config/...`). Override: `CLAUDECODE_MCP_CONFIG`.
+- State: `$XDG_STATE_HOME/claudecode-mcp/` (default `~/.local/state/...`),
+  with `tasks/<task-id>/` per task. Override: `CLAUDECODE_MCP_STATE_DIR`.
+- `claude` binary: `claude` on `PATH`. Override: `CLAUDECODE_MCP_CLAUDE_BIN`.
 
 ## Non-negotiable invariants
 
-- No sessions. Do not add `session_id`, resume support, or session persistence.
-  Calls must remain isolated and use `--no-session-persistence`.
-- No `working_dir` tool input. Tool calls run under `process.cwd()` of the MCP
-  server process.
-- Spawn the `claude` CLI with argv arrays only. Do not build shell command
-  strings from prompts or user input.
-- Prompts above `MAX_PROMPT_ARG_BYTES` (100 KiB) must be delivered to the
-  child via stdin, never as a positional argv element: Linux caps a single
-  argv string at 128 KiB (`MAX_ARG_STRLEN`), and anything larger fails the
-  spawn with `E2BIG`. On Windows, routing must also account for the 32,767
-  UTF-16-unit limit on the complete command line. Keep prompt routing
-  centralized in `routePromptDelivery()`.
-- Keep CLI flag construction centralized in `baseClaudeArgs()`.
-- Default mode must not load the user's MCP servers. Non-bare calls must pin
-  `--strict-mcp-config --mcp-config '{"mcpServers":{}}'`.
-- `--bare` remains opt-in through `CLAUDECODE_MCP_BARE=1`. Bare mode disables
-  OAuth/keychain auth, so users need `ANTHROPIC_API_KEY` or an `apiKeyHelper`
-  setting.
-- The child environment must be an explicit allowlist. Do not pass through the
-  full parent environment. Known-dangerous variables stay stripped unless
-  `CLAUDECODE_MCP_FORWARD_DANGEROUS=1` is set. Keep `skill.sh` aligned with
-  the server allowlist.
-- `claude_prompt_with_context` file paths must be relative and contained under
-  the server cwd. Absolute paths, `..` escapes, and outbound symlinks are
-  rejected. Keep the per-file, file-count, and aggregate-context caps.
-- File context blocks use sentinel fences like `----- file: NAME -----`, not
-  pseudo-XML wrappers.
-- Keep per-call timeout and output caps. When a cap is exceeded, reject with a
-  typed error; do not silently truncate output.
-- Propagate the MCP request `AbortSignal` to active CLI invocations. On POSIX,
-  timeout, cancellation, and output-limit cleanup must terminate the complete
-  process group so descendants cannot outlive a tool call.
-- Keep every non-prompt argv value explicitly bounded. In particular,
-  `system_prompt` and serialized JSON schemas must remain below the per-argument
-  operating-system limit, their combined Windows command line must be checked
-  before spawn, and schema traversal must stay resource-bounded.
-- Errors returned to MCP clients must be redacted and capped. Full diagnostics
-  can go to local stderr, but raw subprocess stderr and client-facing messages
-  must not expose secrets.
-- `claude_prompt` must parse `--output-format json` output. Do not fall back to
-  raw stdout when parsing fails.
-- `claude_prompt_structured` requires the CLI's `--json-schema` flag and fails
-  loudly if unavailable. Do not replace it with prompt-only coercion.
-- Structured output comes from the CLI's `structured_output` field. Treat the
-  natural-language `result` field as a summary, not the schema-conforming
-  value.
-- `validateAgainstSchema()` is intentionally lightweight. The CLI's
-  `--json-schema` validation remains authoritative.
+- Platforms: macOS and Linux only. Node 22 or newer. No Windows code paths.
+- Minimum `claude` CLI version is `MIN_CLAUDE_VERSION` (2.1.287). Check the
+  version; do not probe `--help` for individual flags.
+- Spawn `claude` with argv arrays only. Never build shell command strings
+  from prompts or user input. Send prompts on stdin (stream-json), never as
+  argv.
+- The child environment is an explicit allowlist (`buildChildEnv`). Never
+  pass the full parent environment.
+  - `NEVER_FORWARD` host-session markers (`CLAUDECODE`,
+    `CLAUDE_AUTO_BACKGROUND_TASKS`, `CLAUDE_CODE_SESSION_ID`, and the
+    others in `child-env.ts`) are always dropped. No flag, extra-env list, or
+    profile `env` can re-enable them.
+  - `DANGEROUS_VARS` are dropped unless `CLAUDECODE_MCP_FORWARD_DANGEROUS=1`.
+  - `CLAUDECODE_MCP_DEPTH`, `NO_COLOR`, and `TERM` are always set by us.
+- Depth guard: every task tool calls `assertDepthAllowsTasks()` first. A
+  server at depth >= 1 (inside a delegated task) must not start tasks.
+  Unparseable depth values fail closed.
+- This server is never in a child's MCP server list. Config validation
+  rejects it; the depth guard backs that up.
+- Config is strict: unknown keys and invalid values stop the server at
+  startup with an error that names the file. A missing file means defaults.
+  Do not add silent fallbacks for invalid config.
+- Default profile: `auto` permission mode, `setting_sources:
+  ["project","local"]`, no MCP servers, empty personal hooks and skills.
+  `auto` always runs with `--permission-prompts none`. If the `system/init`
+  event reports another permission mode, the task fails at once (no silent
+  fallback to `default`).
+- The state dir is private: a real directory (not a symlink), owned by the
+  current user, mode 0700.
+- One active `claude` process per session. The CLI does not lock sessions;
+  the runner must.
+- Do not delete a task's worktree while the task can still be resumed:
+  sessions are keyed by cwd.
+- On cancel, timeout, or cap, terminate the complete process group
+  (`SIGINT`, then `SIGTERM`, then `SIGKILL` with a grace period).
+- Errors returned to MCP clients are redacted and capped
+  (`sanitizeForClient`). Full diagnostics go to stderr as JSON lines, never
+  to stdout (stdout is the MCP transport).
+- Keep every resource bounded: time caps, output and event-file caps, config
+  size cap.
 
 ## Testing guidance
 
-`npm test` is the default verification path for code changes. It builds first
-through `pretest`, then runs the offline Node test suite.
+`npm test` is the default check for code changes. It builds first, then runs
+the offline Node test suite. Offline tests use the fake `claude` and never
+need a network or a login.
 
-If you invoke an individual test file directly, run `npm run build` first
-because tests import from `dist/`, not `src/`.
+Live tests are opt-in (`npm run test:live`) and must stay tiny: use `sonnet`
+for anything that needs `auto` mode (it falls back with `haiku`), `haiku`
+otherwise.
 
-Use `npm run test:live` only when you need end-to-end coverage against a real
-`claude` CLI. Live tests require local Claude authentication and are not part
-of CI.
-
-Docs-only changes do not require code tests unless they alter command examples,
-public behavior, or CI expectations.
+Docs-only changes do not need code tests unless they change command
+examples, public behavior, or CI expectations.
 
 ## Change hygiene
 
-- Keep pull requests focused on one concern.
+- One PR per build step or concern. Draft PR, squash merge when green.
 - Update tests when behavior changes.
-- Update README design notes and this file when an invariant, tool contract,
+- Update this file and `docs/DESIGN-v2.md` when an invariant, tool contract,
   command, or operational expectation changes.
 - Update `CHANGELOG.md` under `## [Unreleased]` for public-facing changes.
-- Do not add runtime dependencies beyond `@modelcontextprotocol/sdk` without
-  prior discussion. Justify dev dependency additions.
+- Do not add runtime dependencies beyond `@modelcontextprotocol/sdk` and
+  `zod` without prior discussion. Justify dev dependency additions.
 - Do not add `AGENTS.md` to `package.json` `files` unless the npm package is
   intentionally changed to ship this guide.

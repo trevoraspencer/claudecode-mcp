@@ -1,111 +1,88 @@
 /**
- * Secret redaction and error sanitization utilities.
- *
- * These functions redact sensitive patterns (API keys, bearer tokens, etc.)
- * from text before it reaches MCP clients, and cap error messages at 1 KB
- * to prevent information leakage in oversized error responses.
+ * Secret redaction for anything that can reach an MCP client or a log line.
+ * Client-facing text is also capped at ERROR_SNIPPET_MAX.
  */
 
-import { debugLog, errorLog } from "./invoke.js";
-
-const ERROR_SNIPPET_MAX = 1024;
-
-export { ERROR_SNIPPET_MAX };
+export const ERROR_SNIPPET_MAX = 1024;
 const REDACTION_PATTERN_LOOKAHEAD = 256;
 
-/**
- * Classify a CLI subprocess exit code into a human-readable category.
- */
-export function classifyClaudeExit(code: number | null): string {
-  if (code === 0) return "ok";
-  if (code === null) return "unknown";
-  if (code === 1) return "error";
-  if (code === 2) return "usage_error";
-  return `exit_${code}`;
-}
+const SECRET_ENV_KEYS = new Set([
+  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_AUTH_TOKEN",
+  "CLAUDE_CODE_OAUTH_TOKEN",
+  "CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
+  "AWS_BEARER_TOKEN_BEDROCK",
+  "AWS_ACCESS_KEY_ID",
+  "AWS_SECRET_ACCESS_KEY",
+  "AWS_SESSION_TOKEN",
+  "ANTHROPIC_AWS_API_KEY",
+  "ANTHROPIC_FOUNDRY_API_KEY",
+  "ANTHROPIC_FOUNDRY_AUTH_TOKEN",
+  "AZURE_CLIENT_SECRET",
+  "AZURE_CLIENT_CERTIFICATE_PASSWORD",
+  "CLAUDE_CODE_CLIENT_KEY_PASSPHRASE",
+  // Normally blocked from the child, but operators may explicitly forward
+  // them. Their values can contain credentials or signed headers.
+  "CLAUDE_CODE_EXTRA_BODY",
+  "ANTHROPIC_CUSTOM_HEADERS",
+  "CLAUDE_CODE_SHELL_PREFIX",
+]);
 
 /**
- * Redact known secret patterns from text. Covers Anthropic token patterns,
- * AWS key patterns, and env-var values for standard auth variables.
+ * Values to redact verbatim: known auth variables, keys named in
+ * CLAUDECODE_MCP_EXTRA_ENV, and caller-supplied values (for example a
+ * profile's `env`, which never lives in process.env). Longest first so a
+ * secret that contains another is removed whole.
  */
-function secretEnvValues(): string[] {
-  const knownEnvKeys = new Set([
-    "ANTHROPIC_API_KEY",
-    "ANTHROPIC_AUTH_TOKEN",
-    "CLAUDE_CODE_OAUTH_TOKEN",
-    "CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
-    "AWS_BEARER_TOKEN_BEDROCK",
-    "AWS_ACCESS_KEY_ID",
-    "AWS_SECRET_ACCESS_KEY",
-    "AWS_SESSION_TOKEN",
-    "ANTHROPIC_AWS_API_KEY",
-    "ANTHROPIC_FOUNDRY_API_KEY",
-    "ANTHROPIC_FOUNDRY_AUTH_TOKEN",
-    "AZURE_CLIENT_SECRET",
-    "AZURE_CLIENT_CERTIFICATE_PASSWORD",
-    "CLAUDE_CODE_CLIENT_KEY_PASSPHRASE",
-    // These are normally blocked from the child, but operators may explicitly
-    // forward them. Their values can contain credentials or signed headers.
-    "CLAUDE_CODE_EXTRA_BODY",
-    "ANTHROPIC_CUSTOM_HEADERS",
-    "CLAUDE_CODE_SHELL_PREFIX",
-  ]);
-  const extraEnvKeys = new Set<string>();
-  for (const key of (process.env.CLAUDECODE_MCP_EXTRA_ENV ?? "").split(",")) {
-    const trimmed = key.trim();
-    if (trimmed) extraEnvKeys.add(process.platform === "win32" ? trimmed.toUpperCase() : trimmed);
-  }
+function secretValues(extra: readonly string[] = []): string[] {
+  const extraKeys = new Set(
+    (process.env.CLAUDECODE_MCP_EXTRA_ENV ?? "")
+      .split(",")
+      .map((key) => key.trim())
+      .filter(Boolean),
+  );
   const values = Object.entries(process.env)
-    .filter(([key, value]) => {
-      if (!value) return false;
-      if (knownEnvKeys.has(key.toUpperCase())) return true;
-      const comparableKey = process.platform === "win32" ? key.toUpperCase() : key;
-      return extraEnvKeys.has(comparableKey);
-    })
-    .map(([, value]) => value!)
-    .sort((a, b) => b.length - a.length);
-  return [...new Set(values)];
+    .filter(([key, value]) => value && (SECRET_ENV_KEYS.has(key) || extraKeys.has(key)))
+    .map(([, value]) => value!);
+  values.push(...extra.filter(Boolean));
+  return [...new Set(values)].sort((a, b) => b.length - a.length);
 }
 
 function redactPatternSecrets(text: string): string {
   let out = text;
   out = out.replace(/sk-ant-[A-Za-z0-9_\-]+/g, "sk-ant-***");
   out = out.replace(/\bBearer[ \t]+[A-Za-z0-9._~+\/-]+=*/gi, "Bearer ***");
-  // SEC-006: Extended patterns for common cloud-provider and auth key formats
   out = out.replace(/\bAKIA[A-Z0-9]{16}\b/g, "***"); // AWS access key IDs
-  out = out.replace(/\bASIA[A-Z0-9]{16}\b/g, "***"); // AWS temporary (STS) access key IDs
+  out = out.replace(/\bASIA[A-Z0-9]{16}\b/g, "***"); // AWS temporary (STS) key IDs
   return out;
 }
 
-export function redactSecrets(text: string): string {
+export function redactSecrets(text: string, extraSecrets: readonly string[] = []): string {
   let out = redactPatternSecrets(text);
-  for (const value of secretEnvValues()) {
-    // OBS-006: Redact non-empty env-var values regardless of length.
-    // Previously, values shorter than 5 characters were silently skipped,
-    // which could leak short test credentials.
+  for (const value of secretValues(extraSecrets)) {
     out = out.replaceAll(value, "***");
   }
   return out;
 }
 
 /**
- * Sanitize text for MCP client consumption: redact secrets and truncate
- * to the error snippet maximum (1 KB).
+ * Redact and cap text for an MCP client. Only a window at the start of the
+ * text is copied, so a very large stderr is never redacted in full just to
+ * return 1 KiB. Exact secret matches are found against the original text so
+ * a secret that crosses the window edge is still removed whole.
  */
-export function sanitizeForClient(text: string, startOffset = 0): string {
+export function sanitizeForClient(
+  text: string,
+  startOffset = 0,
+  extraSecrets: readonly string[] = [],
+): string {
   const offset = Number.isFinite(startOffset)
     ? Math.max(0, Math.min(text.length, Math.trunc(startOffset)))
     : 0;
-  // Only the beginning can reach the client. Avoid copying/redacting a full
-  // (up to 50 MiB) subprocess stderr just to return a 1 KiB message. Exact
-  // env-value matches are found against the original text so a long secret
-  // crossing the window boundary is still removed in full.
   const rawWindow = text.slice(offset, offset + ERROR_SNIPPET_MAX + REDACTION_PATTERN_LOOKAHEAD);
   const ranges: Array<{ start: number; end: number }> = [];
-  for (const value of secretEnvValues()) {
-    // If the caller skips leading noise/whitespace, the offset can land in the
-    // middle of a secret (for example an explicitly forwarded value that
-    // itself begins with spaces). Redact the visible suffix as well.
+  for (const value of secretValues(extraSecrets)) {
+    // The offset can land inside a secret; redact the visible suffix too.
     const earliestOverlap = Math.max(0, offset - value.length + 1);
     for (let precedingStart = offset - 1; precedingStart >= earliestOverlap; precedingStart--) {
       if (text[precedingStart] === value[0] && text.startsWith(value, precedingStart)) {
@@ -121,10 +98,7 @@ export function sanitizeForClient(text: string, startOffset = 0): string {
       const start = rawWindow.indexOf(value[0]!, from);
       if (start < 0) break;
       if (text.startsWith(value, offset + start)) {
-        ranges.push({
-          start,
-          end: Math.min(start + value.length, rawWindow.length),
-        });
+        ranges.push({ start, end: Math.min(start + value.length, rawWindow.length) });
       }
       from = start + 1;
     }
@@ -152,39 +126,4 @@ export function sanitizeForClient(text: string, startOffset = 0): string {
     return redacted;
   }
   return redacted.slice(0, ERROR_SNIPPET_MAX) + "...[truncated]";
-}
-
-/**
- * Build a redacted, truncated error for a CLI subprocess failure.
- * Logs structured context via debugLog (opt-in) and errorLog (always-on),
- * both emitting structured JSON lines to stderr.
- *
- * ARCH-008: This function creates errors that are thrown by runClaudePrompt*
- * and caught by handleCallTool. The throw-vs-return contract is:
- * - runClaudePrompt* functions throw on failure
- * - handleCallTool catches throws and converts them to {isError: true} MCP responses
- */
-export function exitError(exitCode: number | null, stderr: string, stdout: string): Error {
-  // Avoid trim() on a potentially 50 MiB captured stream: it can allocate a
-  // second giant string before the 1 KiB sanitizer gets a chance to bound it.
-  const stderrStart = stderr.search(/\S/);
-  const stdoutStart = stdout.search(/\S/);
-  const source = stderrStart >= 0 ? stderr : stdout;
-  const start = stderrStart >= 0 ? stderrStart : Math.max(stdoutStart, 0);
-  const redacted = sanitizeForClient(source, start).trimEnd();
-  // OBS-008: Route through structured debugLog so all error-context logging
-  // is gated and formatted consistently. Use errorLog for the always-on
-  // structured diagnostic (replaces unstructured console.error).
-  debugLog({
-    phase: "subprocess_error",
-    exit_code: exitCode,
-    stderr_snippet: redacted.slice(0, 500),
-  });
-  // OBS-001: Always-on structured error log — not gated by DEBUG, machine-parseable.
-  errorLog({
-    phase: "subprocess_error",
-    exit_code: exitCode,
-    stderr_preview: redacted.slice(0, 200),
-  });
-  return new Error(`claude CLI exited ${exitCode} (${classifyClaudeExit(exitCode)}): ${redacted}`);
 }
