@@ -25,6 +25,7 @@ import {
 import type { Config } from "./config.js";
 import { assertDepthAllowsTasks } from "./depth.js";
 import {
+  RUNNER_CLOSED,
   assertSocketPathFits,
   buildSpec,
   hasLiveRunner,
@@ -126,10 +127,21 @@ function effectiveStatus(s: TaskState): TaskStatus {
   return s.status;
 }
 
-/** The socket is gone or refuses: the runner is dead even if its PID was reused. */
+/**
+ * The runner is gone or going: its socket is missing, refuses, resets, or
+ * closes without an answer (it was shutting down, so it did not act on the
+ * request). Treat it as dead even if its PID was reused. Callers that then
+ * resume do so under the launch lock, which probes the socket again first.
+ */
 function deadSocket(err: unknown): boolean {
-  const code = (err as NodeJS.ErrnoException)?.code;
-  return code === "ENOENT" || code === "ECONNREFUSED";
+  const code = (err as { code?: unknown })?.code;
+  return (
+    code === "ENOENT" ||
+    code === "ECONNREFUSED" ||
+    code === "ECONNRESET" ||
+    code === "EPIPE" ||
+    code === RUNNER_CLOSED
+  );
 }
 
 /** Bound the parts of a result that can be large, and say so when cut. */

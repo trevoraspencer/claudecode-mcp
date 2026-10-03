@@ -30,8 +30,11 @@ const MINUTE = 60_000;
 const LAUNCH_LOCK_STALE_MS = 60_000;
 const LAUNCH_WAIT_MS = 30_000;
 
+/** Error code when a runner closes the connection without answering. */
+export const RUNNER_CLOSED = "ERUNNERCLOSED";
+
 export class RunnerError extends Error {
-  readonly code = "ERUNNER" as const;
+  readonly code: string = "ERUNNER";
   constructor(message: string) {
     super(message);
     this.name = "RunnerError";
@@ -320,7 +323,11 @@ export function requestRunner(
     });
     sock.on("error", (err) => settle(() => reject(err)));
     sock.on("close", () =>
-      settle(() => reject(new RunnerError(`runner for ${taskId} closed the connection`))),
+      settle(() => {
+        const err = new RunnerError(`runner for ${taskId} closed the connection`);
+        (err as { code: string }).code = RUNNER_CLOSED;
+        reject(err);
+      }),
     );
   });
 }

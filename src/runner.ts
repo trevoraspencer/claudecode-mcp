@@ -43,6 +43,7 @@ export const KILL_GRACE_MS = 5_000;
 export const TERM_GRACE_MS = 2_000;
 const PERSIST_DEBOUNCE_MS = 250;
 const CLOSE_GRACE_MS = 1_000;
+const LOCK_WAIT_MS = 5_000;
 
 export type RunnerRequest =
   { op: "status" } | { op: "message"; text: string; interrupt?: boolean } | { op: "cancel" };
@@ -154,7 +155,7 @@ class Runner {
       return 1;
     }
     try {
-      this.releaseLock = acquireSessionLock(this.state.session_id, this.id, this.env);
+      this.releaseLock = await this.acquireLockWithRetry();
     } catch (err) {
       if (err instanceof SessionBusyError) {
         errorLog({ phase: "runner_start", task_id: this.id, error: err.message });
@@ -191,6 +192,23 @@ class Runner {
       this.stop("failed", `runner could not start: ${(err as Error).message}`);
     }
     return exited;
+  }
+
+  /**
+   * A runner that just finished marks the task free (runner: null) a moment
+   * before it releases the session lock. A new runner started in that gap
+   * waits briefly instead of failing the task.
+   */
+  private async acquireLockWithRetry(): Promise<() => void> {
+    const deadline = Date.now() + LOCK_WAIT_MS;
+    for (;;) {
+      try {
+        return acquireSessionLock(this.state.session_id, this.id, this.env);
+      } catch (err) {
+        if (!(err instanceof SessionBusyError) || Date.now() >= deadline) throw err;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+    }
   }
 
   // ── socket ────────────────────────────────────────────────────────
