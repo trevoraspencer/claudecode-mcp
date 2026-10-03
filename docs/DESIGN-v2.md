@@ -77,6 +77,15 @@ Other findings:
 - **`auto` silently falls back to `default` with `haiku`.** No error; the
   `system/init` event reports `permissionMode: "default"`. Headless, `default`
   denies anything that would need a prompt.
+- Follow-up probe (CLI 2.1.288, build step 2):
+  - With stdin left open, `claude -p` stream-json **stays alive after a
+    turn**; the next user message starts a new turn in the same process. Each
+    turn emits its own `system/init`.
+  - Closing stdin mid-turn lets the turn **finish**, then the process exits 0.
+  - **SIGINT ends the process** (after the `error_during_execution` result).
+    The stream-json `control_request` `{"subtype":"interrupt"}` ends the turn
+    and **keeps the process**. The runner uses the control request and falls
+    back to SIGINT + `--resume`.
 - With no profile isolation, the child **inherited the host's personal
   instructions** (it added commit trailers "as the session instructions
   require"). This confirms the need for profiles.
@@ -105,9 +114,15 @@ MCP client ──stdio──▶ claudecode-mcp (server)
     --verbose` with the profile's flags;
   - owns the child's stdin and accepts messages on `runner.sock`;
   - appends every event to `events.jsonl` and updates `task.json`;
-  - enforces the time cap and stall check, and handles interrupt and cancel
-    (SIGINT, then SIGTERM/SIGKILL to the process group);
-  - restarts `claude` with `--resume` for a queued message after a turn ended.
+  - enforces the per-turn time cap, the stall check, and the event-log cap;
+  - interrupts with a stream-json `control_request` (fallback: SIGINT, then
+    restart with `--resume`); stops with SIGINT, then SIGTERM/SIGKILL to the
+    process group;
+  - keeps `claude` alive while idle for `idle_minutes` (default 15), then
+    closes stdin and exits. A later message starts a new runner that resumes
+    the session with `--resume`.
+  - holds a per-session lock file (`sessions/<session-id>.lock`) so only one
+    process ever drives a session.
 - Because runners are detached, **tasks keep running when the MCP server
   restarts**. A new server finds them on disk and reconnects by socket.
 - If a runner dies (reboot, crash), the task becomes `interrupted`. The
@@ -121,8 +136,9 @@ $XDG_STATE_HOME/claudecode-mcp/          (default ~/.local/state/claudecode-mcp)
     task.json       status, session_id, workdir, branch, profile, model,
                     usage, timestamps, last rate-limit info
     events.jsonl    raw stream-json events (the transcript)
-    runner.pid
-    runner.sock
+    runner.log      the runner's own stderr
+    runner.sock     NDJSON requests: status, message, cancel
+  sessions/<session-id>.lock
 ```
 
 ### Worktrees
@@ -198,6 +214,8 @@ Example `~/.config/claudecode-mcp/config.json`:
   "max_concurrent": 3,
   "max_minutes": 120,
   "stall_minutes": 10,
+  "idle_minutes": 15,
+  "max_events_mb": 100,
   "default_profile": "worker",
   "profiles": {
     "worker": {
@@ -287,7 +305,9 @@ later: run the runner inside tmux (`claude --tmux` exists) for a live view.
 ## 8. Limits and safety
 
 - `max_concurrent` running tasks (default 3). More tasks wait as `queued`.
-- 2 h cap, 10 min stall flag, output and event-file size caps.
+- 2 h cap **per turn** (idle time does not count), 10 min stall flag, and an
+  event-file cap (`max_events_mb`, default 100). Reaching the event cap stops
+  the task as `failed`; the log is never silently truncated.
 - `repo` must be inside `allowed_roots`.
 - Rate limits: store the latest `rate_limit_event`. Show 5-hour utilization in
   `get_task`; if rejected, set `rate_limited` with the reset time.
@@ -313,7 +333,9 @@ Release as **2.0.0** (breaking). Rewrite `AGENTS.md` invariants to match.
    validated with `zod` (strict, unknown keys fail); `allowed_roots` defaults
    to the home dir; CI on Node 22 and 24.
 2. Runner: spawn `claude -p` stream-json, events file, socket, interrupt,
-   cancel, caps, stall check.
+   cancel, caps, stall check. **Done.** Decisions: idle runners keep `claude`
+   alive for `idle_minutes`, then exit; `max_minutes` is per turn; the event
+   cap stops the task.
 3. Core tools: `start_task` (`in_place` only), `get_task`, `wait_task`,
    `get_events`, `send_message`, `cancel_task`, `list_tasks`, `ask`.
 4. Worktrees: `isolation: "worktree"`, `get_diff`, `close_task`.
@@ -331,8 +353,8 @@ Tests: offline tests use a fake `claude` that emits stream-json; live tests
 1. Does `--setting-sources project,local` also stop user-level skills in
    `~/.claude/skills`? Verify in step 5; if not, use `--disable-slash-commands`,
    `plugin_dirs`, or `config_dir`.
-2. When the runner closes the child's stdin mid-turn, does `claude -p` finish
-   the turn or abort? (Matters for runner restarts.) Verify in step 2.
+2. ~~When the runner closes the child's stdin mid-turn, does `claude -p`
+   finish the turn or abort?~~ It finishes the turn, then exits (step 2 probe).
 3. Public release: check Anthropic's current terms for using a subscription
    login through third-party tools before publishing.
 4. Should `push_pr` use `gh`, or only push the branch?

@@ -3,7 +3,7 @@
  * Package entry point (`claudecode-mcp`).
  *
  *   claudecode-mcp              start the stdio MCP server
- *   claudecode-mcp runner <id>  run one task (build step 2)
+ *   claudecode-mcp runner <id>  run one task (started detached by the server)
  *   claudecode-mcp --version
  */
 
@@ -11,6 +11,7 @@ import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { fatalLog } from "./log.js";
 import { redactSecrets } from "./redaction.js";
+import { runRunner } from "./runner.js";
 import { getPackageVersion, serve } from "./server.js";
 
 export const MIN_NODE_MAJOR = 22;
@@ -55,7 +56,8 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
         process.stderr.write(USAGE + "\n");
         return 2;
       }
-      throw new Error("runner is not implemented yet");
+      // The runner holds no MCP transport; exit as soon as it is done.
+      process.exit(await runRunner(rest[0]!));
     default:
       process.stderr.write(`unknown command: ${String(cmd).slice(0, 100)}\n${USAGE}\n`);
       return 2;

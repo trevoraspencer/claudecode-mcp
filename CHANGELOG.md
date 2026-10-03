@@ -31,6 +31,15 @@ v2 rebuild in progress (see `docs/DESIGN-v2.md`). Will ship as 2.0.0.
 - Recursion guard via `CLAUDECODE_MCP_DEPTH`.
 - Minimum `claude` CLI version check (2.1.287).
 - `zod` is now a declared runtime dependency (already required by the MCP SDK).
+- Task runner (`claudecode-mcp runner <task-id>`): a detached process per task
+  that drives `claude -p` over stream-json, records every event to
+  `events.jsonl`, and accepts status, message (with interrupt), and cancel
+  requests on a private unix socket. It holds a per-session lock, caps each
+  turn (`max_minutes`), flags stalls (`stall_minutes`), caps the event log
+  (`max_events_mb`), keeps `claude` alive while idle (`idle_minutes`), and
+  stops the whole process group on cancel. A task fails at once if `claude`
+  starts in a different permission mode than requested.
+- New config keys `idle_minutes` (default 15) and `max_events_mb` (default 100).
 
 ### Removed
 

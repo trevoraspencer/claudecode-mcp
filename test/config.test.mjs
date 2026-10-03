@@ -29,6 +29,8 @@ test("a missing config file gives built-in defaults", () => {
   assert.equal(c.max_minutes, 120);
   assert.equal(c.stall_minutes, 10);
   assert.equal(c.stale_days, 7);
+  assert.equal(c.idle_minutes, 15);
+  assert.equal(c.max_events_mb, 100);
   assert.equal(c.default_profile, "worker");
   assert.deepEqual(Object.keys(c.profiles), ["worker"]);
   const w = c.profiles.worker;
@@ -132,6 +134,8 @@ test("rejects bad numbers, modes, and cross-field limits", () => {
     { max_concurrent: 1.5 },
     { max_concurrent: 17 },
     { max_minutes: 0 },
+    { idle_minutes: 0 },
+    { max_events_mb: 0 },
     { stall_minutes: 120, max_minutes: 120 },
     { profiles: { worker: { permission_mode: "default" } } },
     { profiles: { worker: { setting_sources: ["user", "user"] } } },

@@ -13,8 +13,9 @@ changing behavior. v2 is built in steps (design section 10), one PR per step.
 v1 (one-shot `claude_prompt*` tools) was removed in step 1 and lives on in the
 1.x releases on npm.
 
-Build status: step 1 (skeleton) is done. The server starts, loads config,
-and prepares the state dir. It exposes no tools until step 3.
+Build status: steps 1 (skeleton) and 2 (runner) are done. The server
+starts, loads config, and prepares the state dir; the runner can drive a
+task end to end. The server exposes no tools until step 3.
 
 ## Core commands
 
@@ -54,8 +55,14 @@ runs `npm pack --dry-run`.
 ## Architecture map
 
 - `src/cli.ts` - package entry (`bin`). No args starts the MCP server;
-  `runner <task-id>` is reserved for the runner (step 2). Refuses Node < 22
-  and Windows.
+  `runner <task-id>` runs one task's runner. Refuses Node < 22 and Windows.
+- `src/runner.ts` - the detached per-task runner: owns the `claude` child,
+  events.jsonl, task.json updates, the socket, timers, interrupt and stop.
+- `src/launcher.ts` - server side of runners: `buildSpec`, `launchRunner`,
+  `resumeTask`, `requestRunner`.
+- `src/task-store.ts` - task ids, task.json shape, atomic writes.
+- `src/session-lock.ts` - one process per session (lock file with PID).
+- `src/claude-args.ts` - the `claude` argv (all flag decisions in one place).
 - `src/server.ts` - stdio MCP server: startup (`prepare`), server factory.
 - `src/config.ts` - config and profile schema (zod), `loadConfig`,
   `resolveProfile`.
@@ -110,7 +117,16 @@ Tests live in `test/` and import compiled modules from `dist/`.
 - The state dir is private: a real directory (not a symlink), owned by the
   current user, mode 0700.
 - One active `claude` process per session. The CLI does not lock sessions;
-  the runner must.
+  the runner takes `sessions/<session-id>.lock` before it starts `claude`.
+- While a runner is alive it is the only writer of its task.json. The server
+  writes task.json only to create a task or before launching a runner.
+  Writes are atomic (temp file + rename).
+- The runner talks to `claude` only through stream-json on stdin/stdout.
+  Interrupt with a `control_request`; SIGINT ends the process (use it only
+  as the fallback and to stop).
+- The events log is never silently truncated: reaching `max_events_mb`
+  stops the task as `failed`.
+- `max_minutes` caps each turn, not idle time.
 - Do not delete a task's worktree while the task can still be resumed:
   sessions are keyed by cwd.
 - On cancel, timeout, or cap, terminate the complete process group
