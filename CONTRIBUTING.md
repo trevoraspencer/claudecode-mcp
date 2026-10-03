@@ -47,11 +47,11 @@ node --test --test-name-pattern='<regex>' test/<file>.test.mjs
   cheaper to align on direction than to redo a PR.
 - Keep changes focused. One concern per PR.
 - Run `npm run build && npm test` locally before pushing; required CI runs the
-  same commands on Node 20 and 22.
+  same commands on Node 22 and 24.
 - Update `CHANGELOG.md` under an `## [Unreleased]` heading.
-- Do not add runtime dependencies beyond `@modelcontextprotocol/sdk` without
+- Do not add runtime dependencies beyond `@modelcontextprotocol/sdk` and `zod` without
   prior discussion. Devtime additions should be justified.
-- Preserve the design invariants in `README.md` and `AGENTS.md`.
+- Preserve the design invariants in `AGENTS.md` and `docs/DESIGN-v2.md`.
 
 ## Reporting issues
 
