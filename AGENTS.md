@@ -13,11 +13,11 @@ changing behavior. v2 is built in steps (design section 10), one PR per step.
 v1 (one-shot `claude_prompt*` tools) was removed in step 1 and lives on in the
 1.x releases on npm.
 
-Build status: steps 1-4 are done (skeleton, runner, core MCP tools,
-worktrees). The server exposes `start_task` (worktree by default, or
+Build status: steps 1-5 are done (skeleton, runner, core MCP tools,
+worktrees, profiles). The server exposes `start_task` (worktree by default, or
 in_place), `get_task`, `wait_task`, `get_events`, `send_message`,
-`get_diff`, `cancel_task`, `close_task`, `list_tasks`, and `ask`. Profiles
-(step 5) and restart recovery / queueing (step 6) are next.
+`get_diff`, `cancel_task`, `close_task`, `list_tasks`, and `ask`. Restart
+recovery, the `max_concurrent` queue, and rate-limit state (step 6) are next.
 
 ## Core commands
 
@@ -65,6 +65,8 @@ runs `npm pack --dry-run`.
 - `src/task-store.ts` - task ids, task.json shape, atomic writes.
 - `src/session-lock.ts` - one process per session (lock file with PID).
 - `src/claude-args.ts` - the `claude` argv (all flag decisions in one place).
+- `src/profile.ts` - profile references (personal hooks and skills, plugin
+  dirs, settings files, config_dir): checks and per-task generated files.
 - `src/server.ts` - stdio MCP server: startup (`prepare`), tool schemas and
   registration.
 - `src/service.ts` - the task operations behind the tools (`TaskService`).
@@ -92,6 +94,9 @@ Tests live in `test/` and import compiled modules from `dist/`.
 - State: `$XDG_STATE_HOME/claudecode-mcp/` (default `~/.local/state/...`),
   with `tasks/<task-id>/` per task. Override: `CLAUDECODE_MCP_STATE_DIR`.
 - `claude` binary: `claude` on `PATH`. Override: `CLAUDECODE_MCP_CLAUDE_BIN`.
+- Personal Claude home (source of `personal_hooks` / `personal_skills`):
+  `$CLAUDE_CONFIG_DIR` or `~/.claude`. `claudecode-mcp list-personal-config`
+  prints what is available.
 
 ## Non-negotiable invariants
 
@@ -109,6 +114,9 @@ Tests live in `test/` and import compiled modules from `dist/`.
     profile `env` can re-enable them.
   - `DANGEROUS_VARS` are dropped unless `CLAUDECODE_MCP_FORWARD_DANGEROUS=1`.
   - `CLAUDECODE_MCP_DEPTH`, `NO_COLOR`, and `TERM` are always set by us.
+  - Settings `env` (profile `settings`, settings files, and user settings
+    when the profile loads the `user` source) may not set reserved
+    variables either; Claude Code applies it to the child and its tools.
 - Depth guard: every task tool calls `assertDepthAllowsTasks()` first. A
   server at depth >= 1 (inside a delegated task) must not start tasks.
   Unparseable depth values fail closed.

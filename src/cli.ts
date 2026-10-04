@@ -4,6 +4,8 @@
  *
  *   claudecode-mcp              start the stdio MCP server
  *   claudecode-mcp runner <id>  run one task (started detached by the server)
+ *   claudecode-mcp list-personal-config
+ *                               print personal hooks and skills for profiles
  *   claudecode-mcp --version
  */
 
@@ -11,12 +13,14 @@ import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { fatalLog } from "./log.js";
 import { redactSecrets } from "./redaction.js";
+import { describePersonalConfig } from "./profile.js";
 import { runRunner } from "./runner.js";
 import { getPackageVersion, serve } from "./server.js";
 
 export const MIN_NODE_MAJOR = 22;
 
 const USAGE = `usage: claudecode-mcp [--version | --help]
+       claudecode-mcp list-personal-config
        claudecode-mcp runner <task-id>`;
 
 function fatal(err: unknown): never {
@@ -50,6 +54,9 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
     case "--help":
     case "-h":
       process.stdout.write(USAGE + "\n");
+      return 0;
+    case "list-personal-config":
+      process.stdout.write(describePersonalConfig());
       return 0;
     case "runner":
       if (rest.length !== 1) {

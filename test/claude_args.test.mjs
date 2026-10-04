@@ -95,3 +95,26 @@ test("buildSpec converts limits and only lets callers lower max_minutes", () => 
     assert.equal(spec({ max_minutes: 60 }, { max_minutes: bad }).max_turn_ms, 60 * 60_000, bad);
   }
 });
+
+test("profile fields: settings, plugins, skills off, tools", () => {
+  const s = spec({
+    profiles: { worker: { plugin_dirs: ["/opt/p1"], skills: false, tools: ["Read", "Grep"] } },
+  });
+  s.settings_file = "/tmp/task/settings.json";
+  s.personal_plugin_dir = "/tmp/task/personal-plugin";
+  const a = buildClaudeArgs(s, { id: SID, resume: false });
+  assert.equal(val(a, "--settings"), "/tmp/task/settings.json");
+  const plugins = a.flatMap((x, i) => (x === "--plugin-dir" ? [a[i + 1]] : []));
+  assert.deepEqual(plugins, ["/opt/p1", "/tmp/task/personal-plugin"]);
+  assert.ok(a.includes("--disable-slash-commands"));
+  assert.deepEqual(a.slice(a.indexOf("--tools") + 1, a.indexOf("--tools") + 3), ["Read", "Grep"]);
+  const none = buildClaudeArgs(spec({ profiles: { worker: { tools: [] } } }), {
+    id: SID,
+    resume: false,
+  });
+  assert.equal(val(none, "--tools"), "");
+  const plain = buildClaudeArgs(spec(), { id: SID, resume: false });
+  for (const f of ["--settings", "--plugin-dir", "--disable-slash-commands", "--tools"]) {
+    assert.equal(plain.includes(f), false, f);
+  }
+});

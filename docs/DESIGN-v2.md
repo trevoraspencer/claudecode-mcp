@@ -258,7 +258,7 @@ Example `~/.config/claudecode-mcp/config.json`:
       "permission_mode": "auto",
       "setting_sources": ["project", "local"],
       "mcp_servers": {},
-      "personal_hooks": ["PostToolUse:format-on-edit"],
+      "personal_hooks": ["PostToolUse:0"],
       "personal_skills": ["commit-style", "test-runner"]
     },
     "worker-github": {
@@ -315,21 +315,35 @@ Defaults when the config file has no profiles: one `worker` profile with
 
 The user's full personal setup is not loaded, but chosen parts of it can be:
 
-- **Hooks:** `personal_hooks` lists entries as `<Event>:<id>` (or an index).
-  At task start the server reads `~/.claude/settings.json`, copies only those
-  hook entries into a generated settings file, and passes it with
-  `--settings`. Hooks that send notifications or block on `Stop` should not be
-  picked.
-- **Skills:** `personal_skills` lists folder names under `~/.claude/skills`.
-  The server builds a small plugin folder (manifest + links to the chosen
-  skill folders) in the state dir and passes it with `--plugin-dir`. Skills
-  loaded this way may show with a plugin prefix (for example
-  `claudecode-personal:commit-style`).
+- **Hooks:** `personal_hooks` lists entries as `<Event>:<index>` (Claude Code
+  hook entries have no id). At task start the server reads the personal
+  `settings.json` (`$CLAUDE_CONFIG_DIR` or `~/.claude`), copies only those
+  hook entries into `tasks/<id>/settings.json` (merged with the profile's own
+  `settings`), and passes it with `--settings`. Hooks that send
+  notifications or block on `Stop` should not be picked. Indexes are
+  positional: after adding or reordering hooks in `settings.json`, re-run
+  `claudecode-mcp list-personal-config` and update the profile. The generated
+  settings are a snapshot taken when the task is created.
+- Settings `env` (inline, a settings file, or user settings when the profile
+  loads the `user` source) may not set reserved variables
+  (`CLAUDECODE_MCP_DEPTH`, host-session markers): Claude Code applies that
+  `env` to itself and its children, so it could reset the depth guard.
+- **Skills:** `personal_skills` lists folder names under the personal
+  `skills` dir. The server builds `tasks/<id>/personal-plugin` (manifest +
+  symlinks to the chosen skill folders) and passes its **absolute** path
+  with `--plugin-dir` (a relative path does not load). Skills show with the
+  plugin prefix, e.g. `claudecode-personal:commit-style` (verified live).
+- A profile that names a missing hook, skill, plugin dir, settings file, or
+  `config_dir` stops the server at startup, and is checked again at task
+  start. A `config_dir` profile also needs `claude auth status` to report a
+  login there, or the task is refused before anything is created.
 - A `list_personal_config` helper (CLI command, not an MCP tool) prints the
   available hook entries and skill names, to make filling the config easy.
 
-To verify in build step 5: the exact hook-entry naming, and that
-`--setting-sources project,local` does not load `~/.claude/skills` on its own.
+Verified in build step 5 (CLI 2.1.288): `--setting-sources project,local`
+does **not** load `~/.claude/skills` (only built-in skills), and
+`--disable-slash-commands` turns off all skills. Empty setting sources also
+drop the repo's CLAUDE.md, so profiles that want repo memory need `project`.
 
 ## 7. Human take-over
 
@@ -382,7 +396,10 @@ Release as **2.0.0** (breaking). Rewrite `AGENTS.md` invariants to match.
    exclude entry; non-git repos error (suggest `in_place`); `push_pr` pushes
    and opens a draft PR with `gh` when available; closing refuses
    uncommitted changes unless `force`.
-5. Profiles (section 6).
+5. Profiles (section 6). **Done.** Decisions (taken with the recommended
+   defaults when the session asked and got no answer): hooks are named
+   `<Event>:<index>`; broken references fail at startup and at task start;
+   open question 6 was probed without touching `~/.claude.json` (see below).
 6. Restart recovery, `interrupted` state, `max_concurrent` queue, rate-limit
    state.
 7. Docs, live tests, 2.0.0 release prep.
@@ -393,9 +410,8 @@ Tests: offline tests use a fake `claude` that emits stream-json; live tests
 
 ## 11. Open questions
 
-1. Does `--setting-sources project,local` also stop user-level skills in
-   `~/.claude/skills`? Verify in step 5; if not, use `--disable-slash-commands`,
-   `plugin_dirs`, or `config_dir`.
+1. ~~Does `--setting-sources project,local` also stop user-level skills in
+   `~/.claude/skills`?~~ Yes (step 5 probe).
 2. ~~When the runner closes the child's stdin mid-turn, does `claude -p`
    finish the turn or abort?~~ It finishes the turn, then exits (step 2 probe).
 3. Public release: check Anthropic's current terms for using a subscription
@@ -406,5 +422,10 @@ Tests: offline tests use a fake `claude` that emits stream-json; live tests
    init-event mode check and a clear error so users can pick another profile.
 6. In a trusted repo whose `.claude/settings.json` allows `Bash(*)`, does
    plan mode still refuse state-changing commands? If not, read-only `ask`
-   must also drop project settings or block `Bash`. Verify in step 5 with a
-   separate `config_dir` (do not edit the user's `~/.claude.json`).
+   must also drop project settings or block `Bash`. Step 5 probe: with
+   `Bash(*)` allowed through `--settings` (which needs no trust), both haiku
+   and sonnet in plan mode refused to run `touch`; neither even called Bash.
+   So the permission engine itself was not exercised. Accepted risk: read-only
+   `ask` keeps project settings, because dropping them also drops the repo's
+   CLAUDE.md. Revisit if a model is seen running state-changing Bash in plan
+   mode.

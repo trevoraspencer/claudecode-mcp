@@ -14,6 +14,7 @@ import { loadConfig, type LoadedConfig } from "./config.js";
 import { currentDepth } from "./depth.js";
 import { debugLog, warnLog } from "./log.js";
 import { ensureStateDir } from "./paths.js";
+import { assertProfilesValid } from "./profile.js";
 import { sanitizeForClient } from "./redaction.js";
 import { ASK_MAX_S, TaskService, WAIT_MAX_S } from "./service.js";
 
@@ -40,6 +41,8 @@ export interface ServerContext {
  */
 export function prepare(env: NodeJS.ProcessEnv = process.env): ServerContext {
   const loaded = loadConfig(env);
+  // Profiles that name missing skills, hooks, or folders stop the server too.
+  assertProfilesValid(loaded.config, env);
   const stateDir = ensureStateDir(env);
   const depth = currentDepth(env);
   debugLog({

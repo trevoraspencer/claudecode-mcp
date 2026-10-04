@@ -412,7 +412,14 @@ class Runner {
     const args = buildClaudeArgs(spec, { id: this.state.session_id, resume });
     const child = spawn(getClaudeBin(this.env), args, {
       cwd: spec.workdir,
-      env: buildChildEnv({ parentEnv: this.env, profileEnv: spec.profile.env }),
+      env: buildChildEnv({
+        parentEnv: this.env,
+        profileEnv: {
+          ...spec.profile.env,
+          // A separate Claude home for the child (own settings, skills, login).
+          ...(spec.profile.config_dir ? { CLAUDE_CONFIG_DIR: spec.profile.config_dir } : {}),
+        },
+      }),
       stdio: "pipe",
       // Own process group, so stop can signal claude and its tools together.
       detached: true,

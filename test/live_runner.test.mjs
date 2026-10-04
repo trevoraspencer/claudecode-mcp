@@ -101,3 +101,37 @@ test(
     }
   },
 );
+
+test(
+  "live: a personal skill reaches claude through the generated plugin",
+  { skip: !live, timeout: 180_000 },
+  async (t) => {
+    const { personalSkills } = await import("../dist/profile.js");
+    const { readFileSync, readdirSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const skill = personalSkills()[0];
+    if (!skill) return t.skip("no personal skills on this machine");
+    const { sandbox, startServer } = await import("./_mcp.mjs");
+    const box = sandbox({ profiles: { worker: { personal_skills: [skill] } } });
+    delete box.env.CLAUDECODE_MCP_CLAUDE_BIN;
+    const srv = await startServer(box.env);
+    try {
+      const r = await srv.call(
+        "ask",
+        { prompt: "Reply with only the word: pong", model: "haiku", effort: "low", timeout_s: 120 },
+        { timeoutMs: 150_000 },
+      );
+      assert.equal(r.isError, false, r.text);
+      const tasks = join(box.env.CLAUDECODE_MCP_STATE_DIR, "tasks");
+      const [id] = readdirSync(tasks);
+      const init = readFileSync(join(tasks, id, "events.jsonl"), "utf8")
+        .split("\n")
+        .filter(Boolean)
+        .map((l) => JSON.parse(l))
+        .find((e) => e.type === "system" && e.subtype === "init");
+      assert.ok(init.skills.includes(`claudecode-personal:${skill}`), JSON.stringify(init.skills));
+    } finally {
+      srv.stop();
+    }
+  },
+);

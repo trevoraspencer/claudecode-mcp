@@ -43,6 +43,16 @@ if (args[0] === "--version") {
   process.exit(Number(process.env.CLAUDECODE_MCP_FAKE_EXIT ?? 0));
 }
 
+// `auth status`: logged in, unless CLAUDE_CONFIG_DIR is set and has no
+// "logged-in" marker file (a separate Claude home needs its own login).
+if (args[0] === "auth" && args[1] === "status") {
+  const dir = process.env.CLAUDE_CONFIG_DIR;
+  const { existsSync } = await import("node:fs");
+  const loggedIn = !dir || existsSync(`${dir}/logged-in`) || !!process.env.CLAUDE_CODE_OAUTH_TOKEN;
+  process.stdout.write(JSON.stringify({ loggedIn }) + "\n");
+  process.exit(0);
+}
+
 if (process.env.CLAUDECODE_MCP_FAKE_ARGV_OUT) {
   appendFileSync(process.env.CLAUDECODE_MCP_FAKE_ARGV_OUT, JSON.stringify(args) + "\n");
 }

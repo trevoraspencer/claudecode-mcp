@@ -6,7 +6,8 @@
 import { existsSync, mkdtempSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { checkClaudeVersion } from "./claude-cli.js";
+import { checkClaudeAuth, checkClaudeVersion } from "./claude-cli.js";
+import { materializeProfile } from "./profile.js";
 import { cap, readEventsPage, recentSteps, type EventsPage, type Step } from "./compact.js";
 import { taskDiff, type DiffResult } from "./diff.js";
 import {
@@ -48,6 +49,7 @@ import {
   TASK_ID_RE,
   taskFiles,
   writeTask,
+  type TaskSpec,
   type TaskState,
   type TaskStatus,
   type Workspace,
@@ -117,6 +119,26 @@ export interface TaskSummary {
 
 function shellQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * A command a person can paste to continue the session by hand, with the
+ * profile's Claude home, settings, and plugins so the session is found and
+ * its rules still apply.
+ */
+function takeoverCommand(s: TaskState): string {
+  const p = s.spec.profile;
+  const prefix = p.config_dir ? `CLAUDE_CONFIG_DIR=${shellQuote(p.config_dir)} ` : "";
+  const flags: string[] = [];
+  if (s.spec.settings_file) flags.push("--settings", shellQuote(s.spec.settings_file));
+  for (const dir of [
+    ...p.plugin_dirs,
+    ...(s.spec.personal_plugin_dir ? [s.spec.personal_plugin_dir] : []),
+  ]) {
+    flags.push("--plugin-dir", shellQuote(dir));
+  }
+  const tail = flags.length > 0 ? " " + flags.join(" ") : "";
+  return `cd ${shellQuote(s.spec.workdir)} && ${prefix}claude --resume ${s.session_id}${tail}`;
 }
 
 const runnerAlive = (s: TaskState): boolean => hasLiveRunner(s);
@@ -278,7 +300,7 @@ export class TaskService {
       recent: recentSteps(taskFiles(s.id, this.env).events, recent),
       workspace: s.workspace ?? { isolation: "in_place" },
       takeover: {
-        command: `cd ${shellQuote(s.spec.workdir)} && claude --resume ${s.session_id}`,
+        command: takeoverCommand(s),
         ...(alive
           ? {
               note: "the runner is active: cancel_task first so two processes never drive one session",
@@ -345,9 +367,11 @@ export class TaskService {
         ...rest,
         workdir: wt?.workdir ?? repo,
       } satisfies SpecInput);
-      createTask({ id, spec, prompt, name, workspace }, this.env);
+      await this.checkProfileAuth(spec);
+      createTask({ id, spec, prompt, name, workspace, prepare: this.profileFiles(spec) }, this.env);
     } catch (err) {
-      // Nothing ran yet: do not leave an orphan worktree and branch behind.
+      // Nothing ran yet: do not leave an orphan worktree or branch behind.
+      // (createTask removes its own folder when preparing fails.)
       if (wt) {
         await removeWorktree(wt.repo_root, wt.worktree, true).catch(() => {});
         await git(["branch", "-D", wt.branch], wt.repo_root).catch(() => {});
@@ -356,6 +380,24 @@ export class TaskService {
     }
     await withLaunchLock(id, this.env, () => launchRunner(id, this.env));
     return this.view(id, 5);
+  }
+
+  /** createTask hook: build the generated profile files before task.json exists. */
+  private profileFiles(spec: TaskSpec): (taskDir: string) => Partial<TaskSpec> {
+    return (taskDir) => materializeProfile(spec.profile_name, spec.profile, taskDir, this.env);
+  }
+
+  /** A profile with its own Claude home needs its own login there. */
+  private async checkProfileAuth(spec: TaskSpec): Promise<void> {
+    const dir = spec.profile.config_dir;
+    if (!dir) return;
+    // Same env the runner gives claude: the profile's env may hold the token.
+    if (!(await checkClaudeAuth(this.env, { ...spec.profile.env, CLAUDE_CONFIG_DIR: dir }))) {
+      throw new ToolError(
+        `profile "${spec.profile_name}" uses config_dir ${dir}, which is not logged in. ` +
+          `Run: CLAUDE_CONFIG_DIR=${dir} claude auth login (or set CLAUDE_CODE_OAUTH_TOKEN from claude setup-token)`,
+      );
+    }
   }
 
   /** What the task changed since its base commit. */
@@ -702,7 +744,11 @@ export class TaskService {
         spec.permission_mode = "plan";
         spec.extra_disallowed_tools = ["Edit", "Write", "NotebookEdit"];
       }
-      const taskId = createTask({ spec, prompt: input.prompt, name: "ask" }, this.env).id;
+      await this.checkProfileAuth(spec);
+      const taskId = createTask(
+        { spec, prompt: input.prompt, name: "ask", prepare: this.profileFiles(spec) },
+        this.env,
+      ).id;
       id = taskId;
       await withLaunchLock(taskId, this.env, () => launchRunner(taskId, this.env));
       const started = Date.now();

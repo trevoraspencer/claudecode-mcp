@@ -3,9 +3,10 @@
  * visible together. Prompts never appear here: they go on stdin as
  * stream-json messages.
  *
- * Build steps 2-3 map the core profile fields and `disallowed_tools`. The rest of section 6
- * (settings, tools, plugins, personal hooks and skills, config_dir) arrives
- * in build step 5.
+ * Every profile field from DESIGN-v2 section 6 maps here, except `env` and
+ * `config_dir` (child environment, see runner.ts). Personal hooks and skills
+ * arrive as generated files (profile.ts): `settings_file` and
+ * `personal_plugin_dir`.
  */
 
 import type { PermissionMode, TaskSpec } from "./task-store.js";
@@ -68,6 +69,16 @@ export function buildClaudeArgs(
   if (spec.output_schema) {
     args.push("--json-schema", bounded("output_schema", JSON.stringify(spec.output_schema)));
   }
+  if (spec.settings_file) args.push("--settings", spec.settings_file);
+  for (const dir of [
+    ...p.plugin_dirs,
+    ...(spec.personal_plugin_dir ? [spec.personal_plugin_dir] : []),
+  ]) {
+    args.push("--plugin-dir", dir);
+  }
+  if (!p.skills) args.push("--disable-slash-commands");
+  // Variadic; "" means no built-in tools at all.
+  if (p.tools) args.push("--tools", ...(p.tools.length > 0 ? p.tools : [""]));
   const blocked = [...new Set([...p.disallowed_tools, ...(spec.extra_disallowed_tools ?? [])])];
   // Variadic flag: keep it after every other flag so it consumes nothing else.
   if (blocked.length > 0) args.push("--disallowedTools", ...blocked);
