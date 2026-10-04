@@ -73,7 +73,20 @@ export const profileSchema = z.strictObject({
     .max(3)
     .refine((a) => new Set(a).size === a.length, "must not repeat a source")
     .default(["project", "local"]),
-  settings: z.union([pathString, z.record(z.string(), z.unknown())]).optional(),
+  settings: z
+    .union([
+      pathString,
+      z
+        .record(z.string(), z.unknown())
+        .refine(
+          (s) =>
+            !s.env ||
+            typeof s.env !== "object" ||
+            !Object.keys(s.env as object).some((k) => isNeverForwarded(k)),
+          "settings.env may not set reserved variables (CLAUDECODE_MCP_DEPTH, host-session markers)",
+        ),
+    ])
+    .optional(),
   mcp_servers: z
     .record(
       z
@@ -92,7 +105,9 @@ export const profileSchema = z.strictObject({
   plugin_dirs: z.array(pathString).max(64).default([]),
   skills: z.boolean().default(true),
   personal_hooks: z
-    .array(z.string().regex(/^[A-Za-z]+:\S{1,128}$/, "must look like <Event>:<id>"))
+    .array(
+      z.string().regex(/^[A-Za-z]+:\d{1,4}$/, "must look like <Event>:<index>, e.g. PostToolUse:0"),
+    )
     .max(128)
     .default([]),
   personal_skills: z

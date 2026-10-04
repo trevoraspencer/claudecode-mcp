@@ -5,7 +5,7 @@
  */
 
 import { randomBytes, randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Profile } from "./config.js";
 import { tasksDir } from "./paths.js";
@@ -47,6 +47,10 @@ export interface TaskSpec {
   max_event_bytes: number;
   /** How long to wait for a control-request interrupt before falling back to SIGINT. */
   interrupt_timeout_ms: number;
+  /** Generated or profile settings file, passed with --settings. */
+  settings_file?: string;
+  /** Generated plugin folder with the profile's personal skills. */
+  personal_plugin_dir?: string;
 }
 
 export interface TurnResult {
@@ -162,6 +166,12 @@ export interface NewTask {
   /** Use this id (from newTaskId) instead of a fresh one. */
   id?: string;
   workspace?: Workspace;
+  /**
+   * Build generated files in the new task folder before task.json exists,
+   * and return spec fields that point at them. If it throws, the folder is
+   * removed and no task is created.
+   */
+  prepare?: (taskDir: string) => Partial<TaskSpec>;
 }
 
 /** Create the task folder and its first task.json. The prompt becomes the first turn. */
@@ -176,6 +186,15 @@ export function createTask(input: NewTask, env: NodeJS.ProcessEnv = process.env)
       if ((err as NodeJS.ErrnoException).code === "EEXIST" && retry) continue;
       throw err;
     }
+    let extra: Partial<TaskSpec> = {};
+    if (input.prepare) {
+      try {
+        extra = input.prepare(taskDir(id, env));
+      } catch (err) {
+        rmSync(taskDir(id, env), { recursive: true, force: true });
+        throw err;
+      }
+    }
     const now = new Date().toISOString();
     const state: TaskState = {
       version: 1,
@@ -184,7 +203,7 @@ export function createTask(input: NewTask, env: NodeJS.ProcessEnv = process.env)
       created_at: now,
       updated_at: now,
       status: "starting",
-      spec: input.spec,
+      spec: { ...input.spec, ...extra },
       ...(input.workspace ? { workspace: input.workspace } : {}),
       session_id: randomUUID(),
       session_started: false,

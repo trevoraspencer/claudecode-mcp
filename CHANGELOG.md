@@ -11,14 +11,14 @@ v2 rebuild in progress (see `docs/DESIGN-v2.md`). Will ship as 2.0.0.
 
 ### Changed (breaking)
 
-- `main` is now the v2 skeleton. The server starts, loads config, and prepares
-  its state dir, but exposes no tools until the task tools land.
+- v2 replaces the v1 one-shot tools with async task tools (see Added).
 - Requires Node 22 or newer. Supports macOS and Linux only.
 - The `claudecode-mcp` executable is now `dist/cli.js`.
 - `CLAUDECODE` can no longer be forwarded with
   `CLAUDECODE_MCP_FORWARD_DANGEROUS=1`. Host-session variables such as
   `CLAUDECODE`, `CLAUDE_AUTO_BACKGROUND_TASKS`, and `CLAUDE_CODE_SESSION_ID`
   are never passed to the child.
+- `personal_hooks` entries must be `<Event>:<index>` (e.g. `PostToolUse:0`).
 
 ### Added
 
@@ -52,6 +52,11 @@ v2 rebuild in progress (see `docs/DESIGN-v2.md`). Will ship as 2.0.0.
   `.git/info/exclude`. New tools `get_diff` (commits, stat, untracked files,
   capped diff) and `close_task` (`keep_branch`, `delete`, `push_pr` with a
   `gh` draft PR; refuses uncommitted work unless `force`).
+- Full profile support: `settings` (path or inline), `tools`, `plugin_dirs`,
+  `skills: false`, `config_dir` (with a login check), `personal_hooks`
+  (`<Event>:<index>` from your personal `settings.json`), and
+  `personal_skills` (linked into a per-task plugin). Broken references stop
+  the server at startup. New command `claudecode-mcp list-personal-config`.
 
 ### Removed
 

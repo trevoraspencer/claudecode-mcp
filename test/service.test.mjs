@@ -203,3 +203,29 @@ test("a worktree is refused when the repo's top level is outside allowed_roots",
   const svc = new TaskService(parseConfig({ allowed_roots: [pkg] }), ctx.env);
   await assert.rejects(svc.startTask({ prompt: "x", repo: pkg }), /outside allowed_roots/);
 });
+
+test("createTask removes its folder when preparing generated files fails", async (t) => {
+  const ctx = setup(t);
+  const { readdirSync } = await import("node:fs");
+  const spec = buildSpec(ctx.config, { workdir: ctx.repo });
+  assert.throws(
+    () =>
+      createTask(
+        {
+          spec,
+          prompt: "x",
+          prepare: () => {
+            throw new Error("boom");
+          },
+        },
+        ctx.env,
+      ),
+    /boom/,
+  );
+  assert.deepEqual(readdirSync(join(ctx.env.CLAUDECODE_MCP_STATE_DIR, "tasks")), []);
+  const ok = createTask(
+    { spec, prompt: "x", prepare: (dir) => ({ settings_file: join(dir, "s.json") }) },
+    ctx.env,
+  );
+  assert.equal(readTask(ok.id, ctx.env).spec.settings_file.endsWith("/s.json"), true);
+});

@@ -241,3 +241,76 @@ test("an old claude CLI is refused before any task starts", async (t) => {
   assert.match(r.text, /too old/);
   assert.deepEqual((await s.call("list_tasks", {})).json, []);
 });
+
+test("profiles: personal skills, settings, and config_dir reach claude", async (t) => {
+  const { mkdirSync, mkdtempSync, writeFileSync, readFileSync: rf } = await import("node:fs");
+  const { join } = await import("node:path");
+  const personal = mkdtempSync("/tmp/ccm-home-");
+  mkdirSync(join(personal, "skills", "commit-style"), { recursive: true });
+  writeFileSync(
+    join(personal, "skills", "commit-style", "SKILL.md"),
+    "---\nname: commit-style\n---\n",
+  );
+  const childHome = mkdtempSync("/tmp/ccm-child-");
+  writeFileSync(join(childHome, "logged-in"), "");
+  const envOut = join(childHome, "env.json");
+  const s = await server(
+    t,
+    {
+      profiles: {
+        worker: { personal_skills: ["commit-style"], settings: { model: "x" } },
+        isolated: { config_dir: childHome },
+      },
+    },
+    { CLAUDE_CONFIG_DIR: personal, CLAUDECODE_MCP_FAKE_ENV_OUT: envOut },
+  );
+  const r = await s.call("start_task", { prompt: "hi", repo: s.repo });
+  assert.equal(r.isError, false, r.text);
+  await waitIdle(s, r.json.task_id);
+  const args = s.lastArgv();
+  const settingsFile = args[args.indexOf("--settings") + 1];
+  assert.match(settingsFile, /\/tasks\/t[0-9a-z]{10}\/settings\.json$/);
+  assert.deepEqual(JSON.parse(rf(settingsFile, "utf8")), { model: "x" });
+  assert.match(args[args.indexOf("--plugin-dir") + 1], /\/personal-plugin$/);
+
+  const iso = await s.call("start_task", { prompt: "hi", repo: s.repo, profile: "isolated" });
+  assert.equal(iso.isError, false, iso.text);
+  await waitIdle(s, iso.json.task_id);
+  assert.equal(JSON.parse(rf(envOut, "utf8")).CLAUDE_CONFIG_DIR, childHome);
+});
+
+test("a config_dir profile that is not logged in fails before any task starts", async (t) => {
+  const { mkdtempSync } = await import("node:fs");
+  const childHome = mkdtempSync("/tmp/ccm-child-");
+  const s = await server(t, { profiles: { worker: {}, isolated: { config_dir: childHome } } });
+  const r = await s.call("start_task", { prompt: "hi", repo: s.repo, profile: "isolated" });
+  assert.equal(r.isError, true);
+  assert.match(r.text, /not logged in/);
+  assert.deepEqual((await s.call("list_tasks", {})).json, []);
+  assert.equal(s.g("branch", "--list", "claude/*"), "", "no worktree branch left behind");
+});
+
+test("config_dir: a token in the profile env counts as logged in; take-over uses that home", async (t) => {
+  const { mkdtempSync } = await import("node:fs");
+  const childHome = mkdtempSync("/tmp/ccm-child-");
+  const s = await server(t, {
+    profiles: {
+      worker: {},
+      isolated: {
+        config_dir: childHome,
+        env: { CLAUDE_CODE_OAUTH_TOKEN: "tok" },
+        settings: { model: "x" },
+      },
+    },
+  });
+  const r = await s.call("start_task", { prompt: "hi", repo: s.repo, profile: "isolated" });
+  assert.equal(r.isError, false, r.text);
+  const v = await waitIdle(s, r.json.task_id);
+  assert.match(
+    v.takeover.command,
+    new RegExp(
+      `&& CLAUDE_CONFIG_DIR='${childHome}' claude --resume [0-9a-f-]{36} --settings '.*settings\\.json'$`,
+    ),
+  );
+  assert.doesNotMatch(r.text, /tok"/, "the token is not echoed");
+});

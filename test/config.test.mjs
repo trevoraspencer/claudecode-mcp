@@ -65,7 +65,7 @@ test("the design-doc example config is valid", () => {
         permission_mode: "auto",
         setting_sources: ["project", "local"],
         mcp_servers: {},
-        personal_hooks: ["PostToolUse:format-on-edit"],
+        personal_hooks: ["PostToolUse:0"],
         personal_skills: ["commit-style", "test-runner"],
       },
       "worker-github": {
@@ -217,6 +217,7 @@ test("MCP server entries need a command or url and keep extra fields", () => {
 
 test("personal hook and skill names are checked", () => {
   assert.throws(() => parseConfig({ profiles: { worker: { personal_hooks: ["nocolon"] } } }));
+  assert.throws(() => parseConfig({ profiles: { worker: { personal_hooks: ["Stop:name"] } } }));
   assert.throws(() => parseConfig({ profiles: { worker: { personal_skills: ["../evil"] } } }));
   assert.throws(() => parseConfig({ profiles: { worker: { personal_skills: ["a/b"] } } }));
   const c = parseConfig({
@@ -236,4 +237,17 @@ test("resolveProfile picks the default or a named profile", () => {
 test("$schema is allowed for editor support and dropped", () => {
   const c = parseConfig({ $schema: "https://example.test/schema.json" });
   assert.equal("$schema" in c, false);
+});
+
+test("inline settings may not set reserved variables in env", () => {
+  for (const key of ["CLAUDECODE_MCP_DEPTH", "CLAUDECODE", "CLAUDE_CODE_SESSION_ID"]) {
+    assert.throws(
+      () => parseConfig({ profiles: { worker: { settings: { env: { [key]: "0" } } } } }),
+      ConfigError,
+      key,
+    );
+  }
+  assert.doesNotThrow(() =>
+    parseConfig({ profiles: { worker: { settings: { env: { FOO: "1" } } } } }),
+  );
 });

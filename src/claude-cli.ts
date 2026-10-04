@@ -31,6 +31,36 @@ export function compareVersions(a: Version, b: Version): number {
   return 0;
 }
 
+/**
+ * Is `claude` logged in with this environment? Used for profiles with their
+ * own `config_dir`, which need their own login (or CLAUDE_CODE_OAUTH_TOKEN).
+ */
+export function checkClaudeAuth(
+  env: NodeJS.ProcessEnv,
+  profileEnv: Readonly<Record<string, string>> = {},
+): Promise<boolean> {
+  return new Promise((resolve) => {
+    execFile(
+      getClaudeBin(env),
+      ["auth", "status"],
+      {
+        env: buildChildEnv({ parentEnv: env, profileEnv }),
+        timeout: VERSION_TIMEOUT_MS,
+        maxBuffer: VERSION_MAX_OUTPUT,
+        encoding: "utf8",
+      },
+      (err, stdout) => {
+        if (err) return resolve(false);
+        try {
+          resolve((JSON.parse(stdout) as { loggedIn?: unknown }).loggedIn === true);
+        } catch {
+          resolve(false);
+        }
+      },
+    );
+  });
+}
+
 export class ClaudeVersionError extends Error {
   readonly code = "ECLAUDEVERSION" as const;
   constructor(message: string) {

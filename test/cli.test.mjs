@@ -167,3 +167,32 @@ test("stdio: a nested server starts but warns that task tools are off", async ()
   assert.match(stderr, /task tools disabled/);
   child.kill();
 });
+
+test("a profile naming a missing personal skill stops the server at startup", () => {
+  const env = isolatedEnv({ CLAUDE_CONFIG_DIR: mkdtempSync(join(tmpdir(), "ccm-home-")) });
+  writeFileSync(
+    env.CLAUDECODE_MCP_CONFIG,
+    JSON.stringify({ profiles: { worker: { personal_skills: ["ghost"] } } }),
+  );
+  const r = spawnSync(process.execPath, [CLI], {
+    env,
+    input: "",
+    encoding: "utf8",
+    timeout: 10_000,
+  });
+  assert.equal(r.status, 1);
+  const line = JSON.parse(r.stderr.trim().split("\n").at(-1));
+  assert.equal(line.error_class, "ProfileError");
+  assert.match(line.error, /personal skill "ghost" not found/);
+});
+
+test("list-personal-config prints hooks and skills", () => {
+  const home = mkdtempSync(join(tmpdir(), "ccm-home-"));
+  writeFileSync(
+    join(home, "settings.json"),
+    JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: "x.sh" }] }] } }),
+  );
+  const r = run(["list-personal-config"], isolatedEnv({ CLAUDE_CONFIG_DIR: home }));
+  assert.equal(r.status, 0);
+  assert.match(r.stdout, /Stop:0 {2}x\.sh/);
+});
