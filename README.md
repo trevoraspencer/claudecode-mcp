@@ -85,7 +85,7 @@ network-mode plan (`docs/DESIGN-v2.md` section 12).
 
 | Tool | What it does |
 |---|---|
-| `start_task` | Start Claude Code on a task in `repo`. Returns at once with a `task_id`. Default `isolation: "worktree"` (own branch `claude/<slug>-<id>` from `base_ref`, default `HEAD`); `in_place` runs in the folder itself. Options: `profile`, `model`, `effort`, `system_prompt`, `output_schema`, `max_minutes`, `name`. |
+| `start_task` | Start Claude Code on a task in `repo` (a local path) or `repo_url` (a git URL; see below). Returns at once with a `task_id`. Default `isolation: "worktree"` (own branch `claude/<slug>-<id>` from `base_ref`, default `HEAD`); `in_place` runs in the folder itself. Options: `profile`, `model`, `effort`, `system_prompt`, `output_schema`, `max_minutes`, `name`. |
 | `get_task` | Status, last result, usage, rate-limit summary, recent steps, queue position, and a take-over command. |
 | `wait_task` | Wait (up to 50 s per call) until the current turn ends. Call again to keep waiting. |
 | `get_events` | Page through the compact transcript with a byte cursor. |
@@ -93,8 +93,8 @@ network-mode plan (`docs/DESIGN-v2.md` section 12).
 | `get_diff` | Commits, diff stat, new files, and the diff (capped at 200 KiB) since the task's base commit. |
 | `cancel_task` | Stop the task. Its session can be resumed later. |
 | `close_task` | Finish a task: `keep_branch` (default: remove the worktree folder, keep the branch), `delete`, or `push_pr` (push and open a draft PR with `gh`). Refuses to discard uncommitted work unless `force`. |
-| `list_tasks` | Task summaries, newest first, filtered by `status` or `repo`. |
-| `ask` | Blocking question or review (up to 600 s). Read-only by default (plan mode, file-writing tools blocked). Without `repo` it runs in an empty temp folder, so put the material in the prompt. |
+| `list_tasks` | Task summaries, newest first, filtered by `status`, `repo`, or `repo_url`. |
+| `ask` | Blocking question or review (up to 600 s). Read-only by default (plan mode, file-writing tools blocked). Without `repo` or `repo_url` it runs in an empty temp folder, so put the material in the prompt. With `repo_url` it runs in a temporary checkout of `base_ref` that is removed afterwards. |
 
 A typical flow: `start_task` → `wait_task` (loop) → `get_diff` →
 `send_message` to steer → `close_task` with `push_pr`.
@@ -116,6 +116,33 @@ cd '/repo/.claude/worktrees/t1a2b3c4d5e' && claude --resume 6f1c…
 
 Cancel the task first if its runner is still active, so two processes never
 drive one session.
+
+### Repos by URL
+
+A server can also take a git URL instead of a local path, so callers on
+other machines can hand it work on repos it does not have yet. Turn it on
+with an allowlist in the config:
+
+```json
+{
+  "workspaces_dir": "~/claudecode-workspaces",
+  "repo_urls": ["https://github.com/your-name/*", "git@github.com:your-name/*"]
+}
+```
+
+`start_task` and `ask` then accept `repo_url` (exactly one of `repo` or
+`repo_url`). The server keeps one clone per repo at
+`<workspaces_dir>/<scheme>_<host>/<owner>/<repo>.git` and fetches it before
+each task.
+`base_ref` defaults to the remote's default branch; a branch name means the
+remote branch. `repo_url` tasks always get a worktree. Accepted URL forms:
+`https://host/owner/repo`, `ssh://user@host/owner/repo`, and
+`user@host:owner/repo`; `*` in a pattern matches within one path segment.
+Results come back through `get_diff` and `close_task` with `push_pr`.
+
+`claudecode-mcp prune-workspaces [--dry-run] [--force]` removes clones that
+no open task uses. It only touches clones it made, and keeps a clone with
+unpushed local commits, a stash, or loose files unless `--force`.
 
 ## Configuration
 
@@ -164,6 +191,8 @@ error.
 | `http.allowed_hosts` | `[]` | Extra `Host` names to accept, e.g. `vm.tail1234.ts.net`. Loopback names are always accepted. |
 | `http.allowed_origins` | `[]` | Browser origins to accept. Requests with any other `Origin` are refused. |
 | `http.tokens_file` | `http-tokens.json` next to config.json | Per-device token hashes (mode 0600). |
+| `workspaces_dir` | `~/claudecode-workspaces` | Managed clones for `repo_url` tasks. Must be inside `allowed_roots`. |
+| `repo_urls` | `[]` | Allowlist of URL patterns for `repo_url`. Empty turns `repo_url` off. |
 
 ### Profiles
 
@@ -196,6 +225,9 @@ and skills.
   blocks high-risk ones (see `claude auto-mode defaults`). Nothing ever waits
   for a person: anything that would prompt is denied and reported in
   `permission_denials`.
+- **Repo URLs:** only URLs matching `repo_urls` are cloned; other schemes
+  (`ext::`, `http://`, `git://`, `file://`), credentials in URLs, and
+  option-like values are refused, and git may only use https and ssh.
 - **Isolation:** worktree tasks never touch your main checkout. Worktrees are
   excluded from your `git status`.
 - **No recursion:** the child gets `CLAUDECODE_MCP_DEPTH`; a nested server
@@ -233,6 +265,7 @@ server restarts. A restarted server finds them on disk.
 | `CLAUDECODE_MCP_EXTRA_ENV` | Comma-separated extra variables to pass to the child. |
 | `CLAUDECODE_MCP_FORWARD_DANGEROUS` | `1` passes request-altering variables such as `ANTHROPIC_CUSTOM_HEADERS`. |
 | `CLAUDECODE_MCP_DISPATCH_MS` | Queue dispatcher interval (default 2000). |
+| `CLAUDECODE_MCP_ALLOW_FILE_URLS` | `1` allows `file://` repo URLs. For tests only. |
 | `CLAUDECODE_MCP_HTTP_GRACE_MS` | HTTP mode: how long SIGTERM waits for in-flight requests (default 10000). |
 | `DEBUG=claudecode-mcp` | Structured debug logs on stderr. |
 

@@ -5,7 +5,9 @@
  */
 
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
+  mkdirSync,
   closeSync,
   linkSync,
   renameSync,
@@ -151,9 +153,38 @@ export function withDispatchLock<T>(env: NodeJS.ProcessEnv, fn: () => Promise<T>
   return withFileLock(join(stateDir(env), "dispatch.lock"), "dispatch is busy", fn);
 }
 
+/** A clone can take minutes; waiters for the same repo wait that long. */
+const REPO_LOCK_WAIT_MS = 15 * 60_000;
+
+/**
+ * Run `fn` while holding the lock for one managed clone, so clone, fetch,
+ * worktree creation, and prune for one repo never run at once, in any server
+ * process. Locks live in `<workspaces_dir>/.locks`, keyed by the lowercased
+ * path (case-insensitive file systems map two spellings to one folder).
+ */
+export function withRepoLock<T>(
+  lockDir: string,
+  cloneDir: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  mkdirSync(lockDir, { recursive: true, mode: 0o700 });
+  const key = createHash("sha256").update(cloneDir.toLowerCase()).digest("hex").slice(0, 32);
+  return withFileLock(
+    join(lockDir, `repo-${key}.lock`),
+    `repo is busy: ${cloneDir}`,
+    fn,
+    REPO_LOCK_WAIT_MS,
+  );
+}
+
 /** O_EXCL lock file with a holder PID, stale detection, and a heartbeat. */
-async function withFileLock<T>(path: string, busy: string, fn: () => Promise<T>): Promise<T> {
-  const deadline = Date.now() + LAUNCH_WAIT_MS;
+async function withFileLock<T>(
+  path: string,
+  busy: string,
+  fn: () => Promise<T>,
+  waitMs = LAUNCH_WAIT_MS,
+): Promise<T> {
+  const deadline = Date.now() + waitMs;
   const body = JSON.stringify({ pid: process.pid, started_at: new Date().toISOString() });
   for (;;) {
     try {

@@ -470,7 +470,7 @@ Tests: offline tests use a fake `claude` that emits stream-json; live tests
 
 Status: **being built** (started 2026-10-04), one PR per step (N1–N5), each
 with an independent review before merge, as in section 10. The 12.8
-decisions were taken on 2026-10-04. Done: N1. Next: N2.
+decisions were taken on 2026-10-04. Done: N1, N2. Next: N3.
 
 ### 12.1 Goal
 
@@ -566,6 +566,43 @@ First plan:
   progress events for `ask`.
 
 ### 12.5 Step N2: repos by URL
+
+**Done.** Decisions (2026-10-04): `ask` with `repo_url` runs in a temporary
+detached worktree at `base_ref` (fetched first) and removes it afterwards;
+`repo_url` refuses `isolation: "in_place"` (clones are shared); allowlist
+patterns are full URLs (scheme, user, host, and port must match; `*` within
+one segment). As built: https, ssh, and scp-like URLs normalize to one form
+(`.git` dropped for matching, kept for cloning); `file://` only with
+`CLAUDECODE_MCP_ALLOW_FILE_URLS=1` (tests); `.`/`..` segments, percent
+escapes, credentials, query, fragment, and `::` are refused; git runs with
+`GIT_ALLOW_PROTOCOL=https:ssh`. Clones use `--no-checkout` and no
+submodules, are made in a temp folder and renamed into place, and are
+guarded by a per-repo lock in the state dir (`locks/repo-<hash>.lock`,
+held through the fetch and the worktree creation). Branch names in
+`base_ref` resolve to `origin/<name>` first, then tags, then any commit.
+`close_task delete` on a `repo_url` task checks for commits on no remote
+branch (the clone's own `HEAD` goes stale). `workspaces_dir` is checked at
+startup when `repo_urls` is set. Code: `src/repo-url.ts`,
+`src/workspaces.ts`; tests: `test/repo_url.test.mjs`,
+`test/workspaces.test.mjs`.
+
+The review before merge changed: clone layout is
+`<workspaces_dir>/<scheme>_[<user>@]<host>[_<port>]/<owner>/<repo>.git` (https,
+ssh, and scp clones of one repo stay apart; only the leaf ends in `.git`, so
+clones never nest); scp-like URLs keep their form (home-relative in git) and
+are a separate scheme for matching; each clone is marked
+(`claudecode-mcp.managed` in its config), its HEAD detached and its local
+default branch deleted (every local branch is task work); before each fetch
+the marker and `origin` URL must still match the request (refused
+otherwise; tasks run as the same user and could change them); locks live in
+`<workspaces_dir>/.locks`; `close_task delete` counts only commits after the
+task's base that are on no remote branch; `prune-workspaces` touches only
+marked clones, runs `git worktree prune` first, keeps clones with worktrees
+and, without `--force`, ones with unpushed commits, a stash, or loose files,
+renames a clone aside under the lock and deletes it after, and clears temp
+clones left by a crash.
+
+First plan:
 
 - Config: `workspaces_dir` (default `~/claudecode-workspaces`; must be inside
   `allowed_roots`), `repo_urls`: allowlist patterns such as
