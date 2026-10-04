@@ -1,10 +1,11 @@
 # Contributing to claudecode-mcp
 
-Thanks for your interest. This project is small and intentionally narrow in
-scope — a stateless stdio MCP wrapper around the `claude` CLI. Please read
-the [Design notes](./README.md#design-notes) before proposing changes. Some
-boundaries (no session tracking, no `working_dir` arg) are deliberate, and PRs
-that revisit them should explain why.
+Thanks for your interest. This project is an MCP server that runs Claude
+Code as an async task runner. Please read
+[`docs/DESIGN-v2.md`](./docs/DESIGN-v2.md) and the invariants in
+[`AGENTS.md`](./AGENTS.md) before proposing changes. Some boundaries (no
+Windows, the env allowlist, the depth guard, strict config) are deliberate,
+and PRs that revisit them should explain why.
 
 ## Build
 
@@ -13,7 +14,7 @@ npm install
 npm run build
 ```
 
-Output lands in `dist/`. The compiled `dist/server.js` is the binary referenced
+Output lands in `dist/`. The compiled `dist/cli.js` is the binary referenced
 by the `bin` field of `package.json`.
 
 ## Test

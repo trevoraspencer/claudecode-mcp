@@ -3,238 +3,222 @@
 [![CI](https://github.com/trevoraspencer/claudecode-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/trevoraspencer/claudecode-mcp/actions/workflows/ci.yml)
 [![npm version](https://img.shields.io/npm/v/claudecode-mcp.svg)](https://www.npmjs.com/package/claudecode-mcp)
 
-Local stdio MCP server that wraps the headless Claude Code CLI as MCP tools.
-Stateless, spawn-per-call.
+An MCP server that runs [Claude Code](https://code.claude.com) as an
+**async task runner**. Any MCP client can hand coding work or a review to
+Claude Code, track progress, steer it, and collect the result.
 
-> **Status: v2 rebuild in progress on `main`.** v2 turns this server into an
-> async task runner (see [`docs/DESIGN-v2.md`](docs/DESIGN-v2.md)). The v1
-> tools below have been removed from `main`; this README describes the 1.x
-> releases on npm until the v2 docs land. v2 needs Node 22+ on macOS or Linux.
-> Current v2 tools: `start_task`, `get_task`, `wait_task`, `get_events`,
-> `send_message`, `get_diff`, `cancel_task`, `close_task`, `list_tasks`, `ask`.
+- Each task runs in its own git worktree and branch (or in place).
+- Tasks are persistent sessions: they survive an MCP server restart and can
+  be resumed later or taken over by hand with `claude --resume`.
+- Several tasks run in parallel, up to a cap; the rest wait in a queue.
+- A blocking `ask` tool gives quick, read-only reviews and answers.
 
-## Tools
+The design and its decisions are in [`docs/DESIGN-v2.md`](docs/DESIGN-v2.md).
+Version 1.x (one-shot `claude_prompt*` tools) is still on npm; 2.0 replaces it.
 
-- `claude_prompt { prompt, model?, system_prompt? }`
-- `claude_prompt_with_context { prompt, context?, files?, model?, system_prompt? }`
-- `claude_prompt_structured { prompt, schema, model?, system_prompt? }` —
-  uses `claude --json-schema`; fails loudly if the installed CLI lacks that flag.
+## Requirements
 
-## Install from npm
+- macOS or Linux. No Windows.
+- Node 22 or newer.
+- The `claude` CLI, version **2.1.287 or newer**, on your `PATH` and logged
+  in (`claude auth status`). A Pro or Max subscription login works; so do
+  API keys and cloud providers. The server uses the `claude` login you
+  already have.
+- `git` for worktree tasks. `gh` (optional) for `close_task` draft PRs.
+
+## Install
 
 ```sh
 npm install -g claudecode-mcp
 ```
 
-Or install locally and reference the binary from `node_modules/.bin/`. The
-package exposes a `claudecode-mcp` executable that runs the stdio server.
-
-You also need the [`claude` CLI](https://docs.claude.com/en/docs/claude-code)
-on your `PATH`, authenticated however you normally use it (OAuth, keychain,
-or `ANTHROPIC_API_KEY`). This server inherits that auth — it does not manage
-credentials of its own.
-
-**Recommended `claude` CLI version: 2.1.0 or later.** `claude_prompt_structured`
-needs the `--json-schema` flag, and `--no-session-persistence` had a brief
-regression in v2.0.57 (see [anthropics/claude-code#20398](https://github.com/anthropics/claude-code/issues/20398))
-that's resolved in current 2.1.x builds.
-
-## Build from source
-
-```
-npm install
-npm run build
-node dist/server.js
-```
-
-## Register
-
-Claude Code (`~/.claude/mcp.json`):
-
-```json
-{
-  "mcpServers": {
-    "claudecode": {
-      "command": "claudecode-mcp"
-    }
-  }
-}
-```
-
-If you installed locally instead of globally, point `command` at `node` and
-`args` at the absolute path to `dist/server.js`:
-
-```json
-{
-  "mcpServers": {
-    "claudecode": {
-      "command": "node",
-      "args": ["/absolute/path/to/claudecode-mcp/dist/server.js"]
-    }
-  }
-}
-```
-
-## Examples
-
-The `examples/` directory ships with the npm tarball. Each `*.json` is a
-single JSON-RPC `tools/call` request for one of the three tools. See
-[`examples/README.md`](./examples/README.md) for a one-liner to drive them
-against `node dist/server.js`.
-
-## skill.sh
-
-`skill.sh` is a minimal shell wrapper for direct CLI invocation outside MCP.
-Usage: `./skill.sh "<prompt>" [working_dir]`, or pipe a large prompt to
-`./skill.sh - [working_dir]`. It runs `claude --print` with the same flags and
-curated child environment the MCP server uses, including
-`CLAUDECODE_MCP_BARE=1` opt-in. Not installed with the npm package. The script
-remains compatible with the Bash 3.2 shipped by older macOS releases.
-
-## Debug logging
-
-Set `DEBUG=claudecode-mcp` to get one structured JSON line per spawn / call
-on stderr. No prompt bodies are logged — only tool names, byte counts, exit
-codes, and durations.
+Register it with your MCP client. For Claude Code:
 
 ```sh
-DEBUG=claudecode-mcp claudecode-mcp
+claude mcp add claudecode -- claudecode-mcp
 ```
 
-## Test live
+Or in a client's JSON config:
+
+```json
+{
+  "mcpServers": {
+    "claudecode": { "command": "claudecode-mcp" }
+  }
+}
+```
+
+From source: `npm install && npm run build`, then use
+`node /absolute/path/to/dist/cli.js` as the command.
+
+## Tools
+
+| Tool | What it does |
+|---|---|
+| `start_task` | Start Claude Code on a task in `repo`. Returns at once with a `task_id`. Default `isolation: "worktree"` (own branch `claude/<slug>-<id>` from `base_ref`, default `HEAD`); `in_place` runs in the folder itself. Options: `profile`, `model`, `effort`, `system_prompt`, `output_schema`, `max_minutes`, `name`. |
+| `get_task` | Status, last result, usage, rate-limit summary, recent steps, queue position, and a take-over command. |
+| `wait_task` | Wait (up to 50 s per call) until the current turn ends. Call again to keep waiting. |
+| `get_events` | Page through the compact transcript with a byte cursor. |
+| `send_message` | Message a task. During a turn it joins that turn; `interrupt: true` stops the turn first; an idle task starts a new turn; an exited task is resumed. |
+| `get_diff` | Commits, diff stat, new files, and the diff (capped at 200 KiB) since the task's base commit. |
+| `cancel_task` | Stop the task. Its session can be resumed later. |
+| `close_task` | Finish a task: `keep_branch` (default: remove the worktree folder, keep the branch), `delete`, or `push_pr` (push and open a draft PR with `gh`). Refuses to discard uncommitted work unless `force`. |
+| `list_tasks` | Task summaries, newest first, filtered by `status` or `repo`. |
+| `ask` | Blocking question or review (up to 600 s). Read-only by default (plan mode, file-writing tools blocked). Without `repo` it runs in an empty temp folder, so put the material in the prompt. |
+
+A typical flow: `start_task` → `wait_task` (loop) → `get_diff` →
+`send_message` to steer → `close_task` with `push_pr`.
+
+### Task states
+
+`queued` → `starting` → `running` ⇄ `idle` → `closing` → `closed`, plus
+`stalled` (no events for `stall_minutes`, still alive), `interrupted`
+(runner gone, e.g. after a reboot; a message resumes it), `failed`,
+`timed_out`, `cancelled`, and `rate_limited`.
+
+### Taking over by hand
+
+`get_task` returns a ready command, for example:
+
+```sh
+cd '/repo/.claude/worktrees/t1a2b3c4d5e' && claude --resume 6f1c…
+```
+
+Cancel the task first if its runner is still active, so two processes never
+drive one session.
+
+## Configuration
+
+Optional file: `~/.config/claudecode-mcp/config.json` (or
+`$XDG_CONFIG_HOME/claudecode-mcp/config.json`, or the path in
+`CLAUDECODE_MCP_CONFIG`). Without it, the defaults below apply. The file is
+strict: unknown keys or bad values stop the server at startup with a clear
+error.
+
+```json
+{
+  "allowed_roots": ["~/code"],
+  "max_concurrent": 3,
+  "max_minutes": 120,
+  "stall_minutes": 10,
+  "idle_minutes": 15,
+  "max_events_mb": 100,
+  "default_profile": "worker",
+  "profiles": {
+    "worker": {
+      "permission_mode": "auto",
+      "setting_sources": ["project", "local"],
+      "mcp_servers": {},
+      "personal_skills": ["commit-style"]
+    },
+    "reviewer-clean": {
+      "permission_mode": "auto",
+      "setting_sources": ["project"],
+      "skills": false
+    }
+  }
+}
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `allowed_roots` | your home folder | Repos must be inside one of these (checked by real path). |
+| `max_concurrent` | 3 | Turns running at once; more tasks wait as `queued`. |
+| `max_minutes` | 120 | Cap per turn. Idle time does not count. |
+| `stall_minutes` | 10 | Flag a turn as `stalled` after this long without events. |
+| `idle_minutes` | 15 | Keep an idle `claude` alive this long for fast follow-ups. |
+| `max_events_mb` | 100 | Cap on a task's transcript; reaching it stops the task. |
+
+### Profiles
+
+A profile decides how the child Claude Code is set up, separate from your
+personal setup. The default `worker` profile uses `auto` permission mode, no
+MCP servers, and the target repo's own settings, hooks, skills, and
+CLAUDE.md.
+
+| Field | Effect |
+|---|---|
+| `permission_mode` | `auto` (default; needs sonnet or opus, else the task fails at once) or `bypassPermissions`. Always run with `--permission-prompts none`. |
+| `setting_sources` | Which settings load: `user`, `project`, `local`. |
+| `settings` | A settings file path or an inline settings object. |
+| `mcp_servers` | The exact MCP servers for the child. This server is never allowed. |
+| `inherit_user_mcp` | Use your own MCP servers too. |
+| `disallowed_tools`, `tools` | Block tools, or allow only these built-in tools. |
+| `plugin_dirs` | Load these plugin folders. |
+| `skills` | `false` turns off all skills. |
+| `personal_hooks` | Chosen hooks from your `~/.claude/settings.json`, as `<Event>:<index>`. |
+| `personal_skills` | Chosen skills from `~/.claude/skills`, by folder name. |
+| `config_dir` | A fully separate Claude home (needs its own login). |
+| `model`, `effort`, `env` | Defaults for the child. |
+
+Run `claudecode-mcp list-personal-config` to see your hooks (with indexes)
+and skills.
+
+## Safety model
+
+- **Permissions:** `auto` mode lets a safety check decide each action and
+  blocks high-risk ones (see `claude auto-mode defaults`). Nothing ever waits
+  for a person: anything that would prompt is denied and reported in
+  `permission_denials`.
+- **Isolation:** worktree tasks never touch your main checkout. Worktrees are
+  excluded from your `git status`.
+- **No recursion:** the child gets `CLAUDECODE_MCP_DEPTH`; a nested server
+  refuses to start tasks, and profiles cannot reset that marker.
+- **Environment:** the child gets an explicit allowlist of variables, never
+  your whole environment. Host-session variables are never passed.
+- **Data:** task state lives in `~/.local/state/claudecode-mcp` (mode 0700).
+  Errors sent to clients are redacted.
+
+## State on disk
 
 ```
-npm run test:live
+~/.local/state/claudecode-mcp/      ($XDG_STATE_HOME, or CLAUDECODE_MCP_STATE_DIR)
+  tasks/<task-id>/task.json          status, session, workspace, result, usage
+  tasks/<task-id>/events.jsonl       full stream-json transcript
+  tasks/<task-id>/runner.log         the runner's own log
+  sessions/<session-id>.lock         one process per session
 ```
 
-Runs tiny real prompts against `claude`. Skipped unless `CLAUDECODE_MCP_LIVE=1`.
+Each task has a detached runner process, so tasks keep running when the MCP
+server restarts. A restarted server finds them on disk.
+
+## Environment variables
+
+| Variable | Use |
+|---|---|
+| `CLAUDECODE_MCP_CONFIG` | Config file path. |
+| `CLAUDECODE_MCP_STATE_DIR` | State folder (keep it short: socket paths are limited to 103 bytes). |
+| `CLAUDECODE_MCP_CLAUDE_BIN` | Path to the `claude` binary. |
+| `CLAUDECODE_MCP_GH_BIN` | Path to the `gh` binary. |
+| `CLAUDECODE_MCP_EXTRA_ENV` | Comma-separated extra variables to pass to the child. |
+| `CLAUDECODE_MCP_FORWARD_DANGEROUS` | `1` passes request-altering variables such as `ANTHROPIC_CUSTOM_HEADERS`. |
+| `CLAUDECODE_MCP_DISPATCH_MS` | Queue dispatcher interval (default 2000). |
+| `DEBUG=claudecode-mcp` | Structured debug logs on stderr. |
 
 ## Troubleshooting
 
-**`claude: command not found` (or `spawn claude ENOENT`).**
-The MCP server invokes `claude` from your shell `PATH`. If your `claude` CLI
-lives outside `PATH` (or you're launching the MCP under a process that has a
-different `PATH`, e.g. some IDEs), set `CLAUDECODE_MCP_CLAUDE_BIN` to the
-absolute path of the binary:
+- **`claude CLI ... is too old`**: update Claude Code to 2.1.287 or newer.
+- **`claude started in permission mode "default", not "auto"`**: `auto` mode
+  needs sonnet or opus. Pick one of those models, or a
+  `bypassPermissions` profile.
+- **`repo is outside allowed_roots`**: add the folder to `allowed_roots`.
+- **`not a git repository`**: pass `isolation: "in_place"`.
+- **A task shows `interrupted`**: its runner stopped (reboot, crash). Send it
+  a message to resume.
+- **Runner problems**: see `tasks/<id>/runner.log` in the state folder.
+
+## Development
 
 ```sh
-export CLAUDECODE_MCP_CLAUDE_BIN=/usr/local/bin/claude
+npm install
+npm run format:check && npx tsc --noEmit && npm test
+npm run test:live    # tiny real prompts; needs a logged-in claude
 ```
 
-Verify the binary works on its own first:
-
-```sh
-"$CLAUDECODE_MCP_CLAUDE_BIN" --version
-```
-
-**Auth not configured / `Please run claude login`.**
-This server runs `claude` as a child process and inherits its auth. If
-`claude --print "hi"` fails on your shell, the MCP will fail too. Fix the CLI
-first:
-
-- For OAuth/keychain auth: run `claude login` once interactively.
-- For API-key auth: `export ANTHROPIC_API_KEY=sk-ant-...` in the environment
-  that launches the MCP server (your shell, your IDE, your launchd plist,
-  etc.).
-
-`--bare` is intentionally off by default — it would disable OAuth/keychain and
-force `ANTHROPIC_API_KEY`. Set `CLAUDECODE_MCP_BARE=1` only when that tradeoff
-is intentional.
-
-**`claude_prompt_structured` errors with "does not support the --json-schema flag".**
-Your installed `claude` CLI predates `--json-schema`. Upgrade Claude Code
-(`npm i -g @anthropic-ai/claude-code` or whatever your install method is) or
-fall back to `claude_prompt`.
-
-## Design notes
-
-- No session tracking. No `session_id` in tool inputs. `--no-session-persistence` always.
-- No `working_dir` parameter. Uses `process.cwd()` of the MCP server process.
-- Argv array spawning — never shell-interpolated. Prompts larger than 100 KiB
-  are delivered to the CLI via stdin instead of a positional argument (in
-  `--print` mode the CLI reads the prompt from stdin when no positional is
-  given). This stays under the OS per-argument size limit (Linux
-  `MAX_ARG_STRLEN`, 128 KiB), so large contexts — up to the 5 MB per-file
-  cap — spawn successfully instead of failing with `E2BIG`. On Windows, the
-  complete quoted command line is checked against the 32,767 UTF-16-unit
-  CreateProcess limit; prompts move to stdin as needed, and oversized
-  non-prompt combinations fail with a bounded application error before spawn.
-  Prompts that do travel on argv are preceded by a `--` end-of-options
-  separator, so prompt text beginning with `-` can never be parsed as CLI
-  flags.
-- `--bare` is opt-in via `CLAUDECODE_MCP_BARE=1`. Default keeps OAuth/keychain
-  auth working, but pins `--strict-mcp-config --mcp-config '{"mcpServers":{}}'`
-  so the wrapped subprocess does NOT load the user's own MCP servers (avoids
-  the recursion footgun where this server is itself in `~/.claude/mcp.json`).
-  In bare mode, OAuth/keychain are unavailable; you must set
-  `ANTHROPIC_API_KEY` or pass `apiKeyHelper` via `--settings`.
-  See https://code.claude.com/docs/en/headless#start-faster-with-bare-mode.
-
-### Subprocess timeout and output cap
-
-- Default 10-minute per-call timeout. Override with `CLAUDECODE_MCP_TIMEOUT_MS=<ms>`.
-  On timeout the subprocess is sent `SIGTERM` and then `SIGKILL` after a 2s
-  grace, and the tool call rejects with an `InvokeTimeoutError`. On POSIX the
-  complete CLI process group is terminated, including descendants.
-- MCP request cancellation is propagated to the active CLI process (including
-  the shared `--json-schema` capability probe) and rejects with
-  `InvokeAbortedError`; it uses the same process-tree cleanup path. Cancelling
-  one caller does not interrupt a shared probe still needed by another caller.
-- Default 50 MB cap on combined stdout/stderr from a single call. Override with
-  `CLAUDECODE_MCP_MAX_OUTPUT_BYTES=<bytes>`. On overflow the subprocess is
-  killed and the call rejects with `OutputTooLargeError`. There is no silent
-  truncation — truncated JSON would parse to wrong data.
-
-### File context safety (`claude_prompt_with_context`)
-
-- File paths must be **relative** to the server process's working directory.
-  Absolute paths, `..` escapes, and symlinks pointing outside cwd are rejected.
-- Per-file size cap, default 5 MB. Override with `CLAUDECODE_MCP_MAX_FILE_BYTES=<bytes>`.
-- At most 32 files are accepted per request. Free-form context and included
-  file bodies also share a 20 MB aggregate cap; override it with
-  `CLAUDECODE_MCP_MAX_CONTEXT_BYTES=<bytes>`.
-- File contents and paths are inserted into the prompt inside `----- file: NAME -----`
-  fenced blocks (not pseudo-XML), so quotes or angle brackets in paths cannot
-  break the block boundaries.
-
-### Subprocess environment
-
-The child inherits an explicit **allowlist** of environment variables, not the
-full parent env. Pass-through includes:
-
-- Shell/locale: `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `TERM`, `TZ`,
-  `TMPDIR`, `LANG`, `LC_*`, `XDG_*`.
-- Anthropic auth: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
-  `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_OAUTH_REFRESH_TOKEN`,
-  `CLAUDE_CODE_OAUTH_SCOPES`.
-- Cloud provider routing/auth: the documented `CLAUDE_CODE_USE_*` and
-  `CLAUDE_CODE_SKIP_*_AUTH` selectors; standard AWS credential/region/profile
-  variables; `AWS_BEARER_TOKEN_BEDROCK`; `ANTHROPIC_AWS_*`;
-  Foundry API/bearer/resource variables and Azure service-principal variables;
-  and Vertex project/region/application-credentials variables.
-- Routing: `ANTHROPIC_BASE_URL`, `ANTHROPIC_*_BASE_URL`.
-- Model selection: `ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_*_MODEL`, `ANTHROPIC_BETAS`.
-- TLS: `CLAUDE_CODE_CERT_STORE`, `CLAUDE_CODE_CLIENT_CERT`, `CLAUDE_CODE_CLIENT_KEY`,
-  `CLAUDE_CODE_CLIENT_KEY_PASSPHRASE`.
-- Locations: `CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_DEBUG_LOGS_DIR`.
-- Anything in `CLAUDECODE_MCP_EXTRA_ENV` (comma-separated key names).
-
-Windows runtime/config-location variables such as `SystemRoot`, `PATHEXT`,
-`USERPROFILE`, and `APPDATA` are retained on Windows. Always force-set:
-`NO_COLOR=1`, `TERM=dumb`. Always **stripped** (unless the explicit
-`CLAUDECODE_MCP_FORWARD_DANGEROUS=1` opt-in is set):
-`CLAUDE_CODE_SHELL_PREFIX`,
-`CLAUDE_CODE_EXTRA_BODY`, `ANTHROPIC_CUSTOM_HEADERS`,
-`CLAUDE_CODE_SCRIPT_CAPS`, `CLAUDECODE`.
-
-### Error messages
-
-Errors returned to MCP clients are truncated (1 KB) and redact `sk-ant-*`
-tokens, `Bearer …` headers, and any verbatim copies of values held in known
-auth env vars or variables named in `CLAUDECODE_MCP_EXTRA_ENV`. Local
-diagnostics contain redacted, bounded previews and byte counts rather than raw
-CLI stderr.
+Offline tests use a fake `claude` that emits stream-json. See
+[`AGENTS.md`](AGENTS.md) for invariants and conventions, and
+[`CONTRIBUTING.md`](CONTRIBUTING.md) for pull requests.
 
 ## License
 
-[MIT](./LICENSE) © 2026 Trevor Spencer
+MIT

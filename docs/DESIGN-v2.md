@@ -1,6 +1,7 @@
 # claudecode-mcp v2 — design
 
-Status: **approved**. Build in progress (see section 10).
+Status: **approved and built**. 2.0.0 is prepared; publishing waits on the
+release checklist in section 10.
 
 ## 1. Goal
 
@@ -425,7 +426,19 @@ Release as **2.0.0** (breaking). Rewrite `AGENTS.md` invariants to match.
    the session was told to continue): the cap counts active turns, not idle
    runners; queued state lives on disk; any server dispatches; a live
    rejection holds the whole queue.
-7. Docs, live tests, 2.0.0 release prep.
+7. Docs, live tests, 2.0.0 release prep. **Done:** README rewritten for v2,
+   `examples/config.example.json` (tested against the schema, as are the
+   README config blocks), a live interrupt test, version 2.0.0, and the
+   CHANGELOG `[2.0.0]` section.
+
+**Release checklist (for the maintainer; not automated):**
+
+1. Open question 3: check Anthropic's current terms for using a
+   subscription login through third-party tools. This is a human decision.
+2. Run `npm run test:live` once more on the release machine.
+3. Set the CHANGELOG `[2.0.0]` date to the publish date.
+4. Tag `v2.0.0` and push the tag (runs the Release validation workflow).
+5. `npm publish` (needs npm credentials; `prepublishOnly` builds and tests).
 
 Tests: offline tests use a fake `claude` that emits stream-json; live tests
 (opt-in) use tiny prompts: `sonnet` for anything that needs `auto` mode,
