@@ -1,7 +1,7 @@
 # claudecode-mcp v2 — design
 
-Status: **approved and built**. 2.0.0 is prepared; publishing waits on the
-release checklist in section 10.
+Status: **approved and built**. 2.0.0 is on `main`, installed from source
+(no npm package; see section 10).
 
 ## 1. Goal
 
@@ -431,18 +431,12 @@ Release as **2.0.0** (breaking). Rewrite `AGENTS.md` invariants to match.
    README config blocks), a live interrupt test, version 2.0.0, and the
    CHANGELOG `[2.0.0]` section.
 
-**Release decision (2026-10-04):** not publishing for now. 2.0.0 stays
-unpublished and untagged on `main`; no review date was set. Use the
-checklist below when that changes.
-
-**Release checklist (for the maintainer; not automated):**
-
-1. Open question 3: check Anthropic's current terms for using a
-   subscription login through third-party tools. This is a human decision.
-2. Run `npm run test:live` once more on the release machine.
-3. Set the CHANGELOG `[2.0.0]` date to the publish date.
-4. Tag `v2.0.0` and push the tag (runs the Release validation workflow).
-5. `npm publish` (needs npm credentials; `prepublishOnly` builds and tests).
+**Release decision (2026-10-04):** no npm package. The maintainer does not
+need claudecode-mcp published; it is installed from source (clone, `npm ci`,
+`npm run build`, register `dist/cli.js`). `package.json` is marked
+`"private": true` so `npm publish` refuses. Version 2.0.0 on `main` is the
+release; a `v2.0.0` git tag is optional and only runs the Release
+validation workflow.
 
 Tests: offline tests use a fake `claude` that emits stream-json; live tests
 (opt-in) use tiny prompts: `sonnet` for anything that needs `auto` mode,
@@ -454,11 +448,12 @@ Tests: offline tests use a fake `claude` that emits stream-json; live tests
    `~/.claude/skills`?~~ Yes (step 5 probe).
 2. ~~When the runner closes the child's stdin mid-turn, does `claude -p`
    finish the turn or abort?~~ It finishes the turn, then exits (step 2 probe).
-3. Public release: check Anthropic's current terms for using a subscription
-   login through third-party tools before publishing.
+3. ~~Public release: check Anthropic's current terms for using a
+   subscription login through third-party tools before publishing.~~ Moot:
+   no public release (2026-10-04). Revisit only if publishing comes back.
 4. ~~Should `push_pr` use `gh`, or only push the branch?~~ Both: push, then
    `gh pr create --draft` when `gh` is available (step 4).
-5. For a public release: `auto` may not be on every plan. Keep the
+5. If it is ever shared: `auto` may not be on every plan. Keep the
    init-event mode check and a clear error so users can pick another profile.
 6. In a trusted repo whose `.claude/settings.json` allows `Bash(*)`, does
    plan mode still refuse state-changing commands? If not, read-only `ask`

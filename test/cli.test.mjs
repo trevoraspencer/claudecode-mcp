@@ -34,6 +34,7 @@ test("package metadata points at the CLI and requires Node 22", () => {
   assert.equal(PKG.bin["claudecode-mcp"], "dist/cli.js");
   assert.equal(PKG.engines.node, ">=22");
   assert.deepEqual(PKG.os, ["darwin", "linux"]);
+  assert.equal(PKG.private, true, "not published to npm");
   assert.ok(statSync(CLI).mode & 0o100, "dist/cli.js must be executable");
 });
 
