@@ -20,6 +20,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   manage per-device tokens. Only SHA-256 hashes are stored, in a 0600
   `http-tokens.json` next to config.json; a running server picks up
   changes at once.
+- Repos by URL: `start_task` and `ask` accept `repo_url` (instead of
+  `repo`) for URLs on the new `repo_urls` allowlist. The server keeps one
+  managed clone per repo under `workspaces_dir` (default
+  `~/claudecode-workspaces`), fetches before each task, and branches from
+  the remote's default branch (or `base_ref`, read as a remote branch).
+  `ask` with `repo_url` runs in a temporary checkout. `list_tasks` shows and
+  filters by `repo_url`. `close_task delete` on such tasks checks for
+  commits not on the remote.
+- `claudecode-mcp prune-workspaces [--dry-run] [--force]` removes managed
+  clones that no open task uses, keeping ones with unpushed commits.
 
 ## [2.0.0] - 2026-10-03
 

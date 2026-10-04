@@ -16,7 +16,8 @@ installed from source and is not published to npm (`"private": true`).
 Build status: all build steps (1-7) are done; 2.0.0 is on `main`. No npm
 package (decision recorded in `docs/DESIGN-v2.md` section 10). Current work: network mode (HTTP over the tailnet on a Proxmox
 VM), steps N1–N5 in `docs/DESIGN-v2.md` section 12. The 12.8 decisions are
-taken; N1 (HTTP transport and auth) is done; N2 (repos by URL) is next. The server exposes `start_task` (worktree by default, or
+taken; N1 (HTTP transport and auth) and N2 (repos by URL) are done; N3
+(results out: push + draft PRs) is next. The server exposes `start_task` (worktree by default, or
 in_place), `get_task`, `wait_task`, `get_events`, `send_message`,
 `get_diff`, `cancel_task`, `close_task`, `list_tasks`, and `ask`.
 
@@ -78,6 +79,9 @@ runs `npm pack --dry-run`.
 - `src/service.ts` - the task operations behind the tools (`TaskService`).
 - `src/compact.ts` - compact steps and event pages from events.jsonl.
 - `src/repo.ts` - `repo` path checks against `allowed_roots` (realpath).
+- `src/repo-url.ts` - `repo_url` parsing, normalization, allowlist matching.
+- `src/workspaces.ts` - managed clones (clone/fetch, remote base refs, ask
+  worktrees, `prune-workspaces`).
 - `src/git.ts` - git/gh helpers: worktree create/remove, refs, dirty files.
 - `src/diff.ts` - `get_diff` (commits, stat, untracked, capped diff).
 - `src/config.ts` - config and profile schema (zod), `loadConfig`,
@@ -163,6 +167,14 @@ Tests live in `test/` and import compiled modules from `dist/`.
   `assertDepthAllowsTasks()` first.
 - A caller's `repo` must resolve (realpath) to a directory inside
   `allowed_roots`.
+- A caller's `repo_url` must parse (`parseRepoUrl`) and match a `repo_urls`
+  pattern before anything is cloned or fetched. Only https and ssh (scp-like
+  included) are accepted; `file://` only with the test switch
+  `CLAUDECODE_MCP_ALLOW_FILE_URLS=1`. Clone and fetch run with
+  `GIT_ALLOW_PROTOCOL`, `--no-recurse-submodules`, and `--` before the URL.
+- Managed clones live under `workspaces_dir`, which must be inside
+  `allowed_roots`. Clone, fetch, and worktree creation for one repo run
+  under `withRepoLock`. `repo_url` tasks never run `in_place`.
 - `ask` is read-only unless `writable: true` (plan mode plus blocked file
   tools). Without `repo` it runs in a fresh temp folder that is removed
   afterwards.

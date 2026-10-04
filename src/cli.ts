@@ -7,6 +7,8 @@
  *   claudecode-mcp token add|list|revoke
  *                               manage per-device bearer tokens for --http
  *   claudecode-mcp runner <id>  run one task (started detached by the server)
+ *   claudecode-mcp prune-workspaces [--dry-run] [--force]
+ *                               remove managed clones no open task uses
  *   claudecode-mcp list-personal-config
  *                               print personal hooks and skills for profiles
  *   claudecode-mcp --version
@@ -21,6 +23,7 @@ import { addToken, readTokens, revokeToken, tokensFilePath } from "./http-tokens
 import { fatalLog } from "./log.js";
 import { redactSecrets } from "./redaction.js";
 import { describePersonalConfig } from "./profile.js";
+import { pruneWorkspaces } from "./workspaces.js";
 import { runRunner } from "./runner.js";
 import { getPackageVersion, serve } from "./server.js";
 
@@ -28,6 +31,7 @@ export const MIN_NODE_MAJOR = 22;
 
 const USAGE = `usage: claudecode-mcp [--http | --version | --help]
        claudecode-mcp token add <device-name> | token list | token revoke <device-name>
+       claudecode-mcp prune-workspaces [--dry-run] [--force]
        claudecode-mcp list-personal-config
        claudecode-mcp runner <task-id>`;
 
@@ -72,6 +76,8 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
     case "-h":
       process.stdout.write(USAGE + "\n");
       return 0;
+    case "prune-workspaces":
+      return pruneCommand(rest);
     case "list-personal-config":
       process.stdout.write(describePersonalConfig());
       return 0;
@@ -86,6 +92,28 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
       process.stderr.write(`unknown command: ${String(cmd).slice(0, 100)}\n${USAGE}\n`);
       return 2;
   }
+}
+
+/** `prune-workspaces`: remove managed clones that no open task uses. */
+async function pruneCommand(args: readonly string[]): Promise<number> {
+  const flags = new Set(args);
+  if ([...flags].some((f) => f !== "--dry-run" && f !== "--force") || flags.size !== args.length) {
+    process.stderr.write(USAGE + "\n");
+    return 2;
+  }
+  if (currentDepth() >= 1) {
+    throw new Error("prune-workspaces refuses to run inside a delegated task");
+  }
+  const dryRun = flags.has("--dry-run");
+  const result = await pruneWorkspaces(loadConfig().config, process.env, {
+    dryRun,
+    force: flags.has("--force"),
+  });
+  for (const c of result.removed)
+    process.stdout.write(`${dryRun ? "would remove" : "removed"}\t${c}\n`);
+  for (const k of result.kept) process.stdout.write(`kept\t${k.clone}\t${k.reason}\n`);
+  if (result.removed.length + result.kept.length === 0) process.stderr.write("no managed clones\n");
+  return 0;
 }
 
 /** `token add|list|revoke`: manage the per-device tokens file for --http. */

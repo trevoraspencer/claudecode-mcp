@@ -37,12 +37,21 @@ import {
   waitForLaunch,
   withDispatchLock,
   withLaunchLock,
+  withRepoLock,
   type SpecInput,
 } from "./launcher.js";
 import { errorLog, warnLog } from "./log.js";
 import { expandHome, tasksDir } from "./paths.js";
 import { redactSecrets } from "./redaction.js";
 import { isInside, resolveRepo } from "./repo.js";
+import { parseRepoUrl } from "./repo-url.js";
+import {
+  addAskWorktree,
+  checkRepoUrl,
+  removeAskWorktree,
+  resolveRemoteBase,
+  withManagedClone,
+} from "./workspaces.js";
 import type { Delivery } from "./runner.js";
 import {
   createTask,
@@ -118,6 +127,7 @@ export interface TaskSummary {
   name?: string;
   status: TaskStatus;
   workdir: string;
+  repo_url?: string;
   profile: string;
   turns: number;
   created_at: string;
@@ -214,7 +224,8 @@ const sleep = (ms: number, signal?: AbortSignal) =>
 
 export interface StartInput {
   prompt: string;
-  repo: string;
+  repo?: string;
+  repo_url?: string;
   isolation?: "worktree" | "in_place";
   base_ref?: string;
   profile?: string;
@@ -229,6 +240,8 @@ export interface StartInput {
 export interface AskInput {
   prompt: string;
   repo?: string;
+  repo_url?: string;
+  base_ref?: string;
   profile?: string;
   model?: string;
   effort?: string;
@@ -504,20 +517,55 @@ export class TaskService {
 
   async startTask(input: StartInput): Promise<TaskView> {
     this.guard();
-    const repo = resolveRepo(input.repo, this.config.allowed_roots);
+    if ((input.repo === undefined) === (input.repo_url === undefined)) {
+      throw new ToolError("pass exactly one of repo or repo_url");
+    }
     const isolation = input.isolation ?? "worktree";
     if (isolation === "in_place" && input.base_ref) {
       throw new ToolError('base_ref needs isolation: "worktree"');
     }
+    if (input.repo_url !== undefined && isolation === "in_place") {
+      throw new ToolError(
+        'repo_url tasks always get a worktree (managed clones are shared); drop isolation: "in_place"',
+      );
+    }
+    const url =
+      input.repo_url !== undefined
+        ? checkRepoUrl(input.repo_url, this.config, this.env)
+        : undefined;
+    const repoPath =
+      input.repo !== undefined ? resolveRepo(input.repo, this.config.allowed_roots) : undefined;
     assertSocketPathFits(this.env);
     await this.ensureCli();
-    const { prompt, name, isolation: _i, base_ref: _b, repo: _r, ...rest } = input;
+    const { prompt, name, isolation: _i, base_ref: _b, repo: _r, repo_url: _u, ...rest } = input;
     const id = newTaskId();
     // The title becomes a branch name and maybe a PR title: redact it.
     const title = cap(redactSecrets(name ?? prompt.split("\n")[0] ?? "task"), 70);
     let workspace: Workspace;
     let wt: NewWorktree | undefined;
-    if (isolation === "worktree") {
+    if (url) {
+      // Clone or fetch, then branch from the fresh remote ref, all under the
+      // repo lock so no other task fetches into the clone meanwhile.
+      wt = await withManagedClone(url, this.config, this.env, async (clone) =>
+        createWorktree({
+          repo: clone,
+          top: clone,
+          taskId: id,
+          baseRef: await resolveRemoteBase(clone, input.base_ref),
+          title,
+        }),
+      );
+      workspace = {
+        isolation,
+        repo_root: wt.repo_root,
+        worktree: wt.worktree,
+        branch: wt.branch,
+        base_commit: wt.base_commit,
+        title,
+        repo_url: url.canonical,
+      };
+    } else if (isolation === "worktree") {
+      const repo = repoPath!;
       const top = await repoTop(repo);
       if (!top) throw new ToolError(`not a git repository: ${repo}; pass isolation: "in_place"`);
       // The worktree mirrors the whole repo, so the repo's top level must be
@@ -542,6 +590,7 @@ export class TaskService {
         title,
       };
     } else {
+      const repo = repoPath!;
       const top = await repoTop(repo);
       // A repo with no commits yet has no base; get_diff then says so.
       const head = top ? await run("git", ["rev-parse", "--verify", "-q", "HEAD"], top) : null;
@@ -557,7 +606,7 @@ export class TaskService {
     try {
       const spec = buildSpec(this.config, {
         ...rest,
-        workdir: wt?.workdir ?? repo,
+        workdir: wt?.workdir ?? repoPath!,
       } satisfies SpecInput);
       await this.checkProfileAuth(spec);
       createTask({ id, spec, prompt, name, workspace, prepare: this.profileFiles(spec) }, this.env);
@@ -699,7 +748,19 @@ export class TaskService {
           }
         }
       }
-      if (action === "delete" && !force) {
+      if (action === "delete" && !force && wt.repo_url) {
+        // A managed clone's own HEAD is never updated; what matters is
+        // whether the work is on the remote.
+        const ahead = (
+          await git(["rev-list", "--count", branch, "--not", "--remotes"], root)
+        ).trim();
+        if (ahead !== "0") {
+          throw new ToolError(
+            `branch ${branch} has ${ahead} commit(s) not on any remote branch; ` +
+              "use push_pr, keep_branch, or pass force: true to delete them",
+          );
+        }
+      } else if (action === "delete" && !force) {
         const ahead = (await git(["rev-list", "--count", `HEAD..${branch}`], root)).trim();
         if (ahead !== "0") {
           throw new ToolError(
@@ -892,7 +953,12 @@ export class TaskService {
     return this.view(id, 5);
   }
 
-  listTasks(filter: { status?: TaskStatus; repo?: string; limit?: number }): TaskSummary[] {
+  listTasks(filter: {
+    status?: TaskStatus;
+    repo?: string;
+    repo_url?: string;
+    limit?: number;
+  }): TaskSummary[] {
     this.guard();
     let names: string[];
     try {
@@ -908,6 +974,14 @@ export class TaskService {
         return [];
       }
     }
+    let repoUrl: string | undefined;
+    if (filter.repo_url) {
+      try {
+        repoUrl = parseRepoUrl(filter.repo_url, { allowFile: true }).canonical;
+      } catch {
+        return [];
+      }
+    }
     const out: TaskSummary[] = [];
     for (const name of names) {
       let s: TaskState;
@@ -919,11 +993,13 @@ export class TaskService {
       const status = effectiveStatus(s);
       if (filter.status && status !== filter.status) continue;
       if (repo && !isInside(s.spec.workdir, repo)) continue;
+      if (repoUrl && s.workspace?.repo_url !== repoUrl) continue;
       out.push({
         task_id: s.id,
         ...(s.name ? { name: s.name } : {}),
         status,
         workdir: s.spec.workdir,
+        ...(s.workspace?.repo_url ? { repo_url: s.workspace.repo_url } : {}),
         profile: s.spec.profile_name,
         turns: s.turns,
         created_at: s.created_at,
@@ -942,11 +1018,22 @@ export class TaskService {
   async ask(input: AskInput, signal?: AbortSignal, progress?: Progress): Promise<string> {
     this.guard();
     const timeoutS = Math.min(input.timeout_s ?? 300, ASK_MAX_S);
+    if (input.repo !== undefined && input.repo_url !== undefined) {
+      throw new ToolError("pass repo or repo_url, not both");
+    }
+    if (input.base_ref !== undefined && input.repo_url === undefined) {
+      throw new ToolError("base_ref needs repo_url");
+    }
+    const url =
+      input.repo_url !== undefined
+        ? checkRepoUrl(input.repo_url, this.config, this.env)
+        : undefined;
     let tempDir: string | undefined;
-    let workdir: string;
+    let askWorktree: { clone: string; path: string } | undefined;
+    let workdir = "";
     if (input.repo) {
       workdir = resolveRepo(input.repo, this.config.allowed_roots);
-    } else {
+    } else if (!url) {
       tempDir = realpathSync.native(mkdtempSync(join(tmpdir(), "claudecode-mcp-ask-")));
       workdir = tempDir;
     }
@@ -954,6 +1041,14 @@ export class TaskService {
     try {
       assertSocketPathFits(this.env);
       await this.ensureCli();
+      if (url) {
+        // A throwaway detached worktree at the fresh remote ref; removed below.
+        askWorktree = await withManagedClone(url, this.config, this.env, async (clone) => ({
+          clone,
+          path: await addAskWorktree(clone, await resolveRemoteBase(clone, input.base_ref)),
+        }));
+        workdir = askWorktree.path;
+      }
       const readOnly = input.writable !== true;
       const spec = buildSpec(this.config, {
         workdir,
@@ -1008,6 +1103,12 @@ export class TaskService {
         } catch (err) {
           errorLog({ phase: "ask_cleanup", dir: tempDir, error: (err as Error).message });
         }
+      }
+      if (askWorktree && stopped) {
+        const { clone, path } = askWorktree;
+        await withRepoLock(clone, this.env, () => removeAskWorktree(clone, path)).catch(
+          (err: Error) => errorLog({ phase: "ask_cleanup", dir: path, error: err.message }),
+        );
       }
     }
   }

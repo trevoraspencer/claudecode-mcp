@@ -20,6 +20,7 @@ import { ensureStateDir } from "./paths.js";
 import { assertProfilesValid } from "./profile.js";
 import { sanitizeForClient } from "./redaction.js";
 import { ASK_MAX_S, TaskService, WAIT_MAX_S } from "./service.js";
+import { ensureWorkspacesDir } from "./workspaces.js";
 
 export function getPackageVersion(): string {
   try {
@@ -47,6 +48,8 @@ export function prepare(env: NodeJS.ProcessEnv = process.env): ServerContext {
   // Profiles that name missing skills, hooks, or folders stop the server too.
   assertProfilesValid(loaded.config, env);
   const stateDir = ensureStateDir(env);
+  // repo_url on: the workspaces folder must be usable before the first task.
+  if (loaded.config.repo_urls.length > 0) ensureWorkspacesDir(loaded.config);
   const depth = currentDepth(env);
   debugLog({
     phase: "startup",
@@ -88,6 +91,7 @@ const statusEnum = z.enum([
   "closing",
   "closed",
 ]);
+const repoUrl = z.string().min(1).max(2048);
 const recent = z.int().min(0).max(50).optional().describe("How many recent steps to include.");
 
 function json(value: unknown): CallToolResult {
@@ -153,7 +157,18 @@ export function createServer(ctx: ServerContext, tasks: TaskService): McpServer 
         "get_task/wait_task, steer it with send_message, review with get_diff, finish with close_task.",
       inputSchema: {
         prompt: prompt.describe("The task for Claude."),
-        repo: z.string().min(1).max(4096).describe("Absolute path inside allowed_roots."),
+        repo: z
+          .string()
+          .min(1)
+          .max(4096)
+          .optional()
+          .describe("Absolute path inside allowed_roots. Pass this or repo_url."),
+        repo_url: repoUrl
+          .optional()
+          .describe(
+            "Git URL (https://host/owner/repo or git@host:owner/repo) on the server's repo_urls " +
+              "allowlist. The server clones or fetches it and starts a worktree from base_ref.",
+          ),
         isolation: z
           .enum(["worktree", "in_place"])
           .optional()
@@ -162,7 +177,10 @@ export function createServer(ctx: ServerContext, tasks: TaskService): McpServer 
           .string()
           .max(256)
           .optional()
-          .describe("Branch, tag, or commit to start the worktree from (default HEAD)."),
+          .describe(
+            "Branch, tag, or commit to start the worktree from (default HEAD; with repo_url, " +
+              "the remote's default branch, and branch names mean the remote branch).",
+          ),
         profile: z.string().max(64).optional().describe("Profile name from the server config."),
         model: model.optional(),
         effort: effort.optional(),
@@ -310,6 +328,7 @@ export function createServer(ctx: ServerContext, tasks: TaskService): McpServer 
       inputSchema: {
         status: statusEnum.optional(),
         repo: z.string().max(4096).optional().describe("Only tasks in this folder."),
+        repo_url: repoUrl.optional().describe("Only tasks started from this repo_url."),
         limit: z.int().min(1).max(200).optional().describe("Default 50."),
       },
     },
@@ -329,6 +348,17 @@ export function createServer(ctx: ServerContext, tasks: TaskService): McpServer 
       inputSchema: {
         prompt: prompt.describe("The question, with any material to review."),
         repo: z.string().max(4096).optional().describe("Absolute path inside allowed_roots."),
+        repo_url: repoUrl
+          .optional()
+          .describe(
+            "Git URL on the repo_urls allowlist: runs in a temporary checkout of base_ref, " +
+              "removed afterwards (changes from writable asks are discarded).",
+          ),
+        base_ref: z
+          .string()
+          .max(256)
+          .optional()
+          .describe("With repo_url: branch, tag, or commit (default the remote's default branch)."),
         profile: z.string().max(64).optional(),
         model: model.optional(),
         effort: effort.optional(),

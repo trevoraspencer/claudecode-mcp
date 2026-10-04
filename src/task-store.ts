@@ -78,6 +78,8 @@ export interface Workspace {
   base_commit?: string;
   /** Short title for branch names and PRs. */
   title?: string;
+  /** Canonical repo_url for tasks in a managed clone (section 12.5). */
+  repo_url?: string;
 }
 
 export interface TaskState {

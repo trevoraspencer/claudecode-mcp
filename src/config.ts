@@ -14,6 +14,7 @@ import { basename, isAbsolute, resolve } from "node:path";
 import { z } from "zod";
 import { isNeverForwarded } from "./child-env.js";
 import { configPath, expandHome } from "./paths.js";
+import { parseRepoUrl, RepoUrlError } from "./repo-url.js";
 
 export const MAX_CONFIG_BYTES = 1024 * 1024;
 export const SELF_NAME = "claudecode-mcp";
@@ -210,6 +211,27 @@ export const configSchema = z
     default_profile: profileName.default(DEFAULT_PROFILE_NAME),
     profiles: z.record(profileName, profileSchema).default({}),
     http: httpSchema.default(httpSchema.parse({})),
+    /** Managed clones for `repo_url` tasks; must be inside allowed_roots. */
+    workspaces_dir: pathString.default(expandHome("~/claudecode-workspaces")),
+    /** Allowlist for `repo_url` (full URL patterns, `*` within a segment). Empty: repo_url is off. */
+    repo_urls: z
+      .array(
+        z
+          .string()
+          .max(2048)
+          .superRefine((p, ctx) => {
+            try {
+              parseRepoUrl(p, { pattern: true, allowFile: true });
+            } catch (err) {
+              ctx.addIssue({
+                code: "custom",
+                message: err instanceof RepoUrlError ? err.message : "invalid pattern",
+              });
+            }
+          }),
+      )
+      .max(256)
+      .default([]),
   })
   .transform((c) => {
     const { $schema: _schema, ...rest } = c;
