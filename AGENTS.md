@@ -14,7 +14,9 @@ v1 (one-shot `claude_prompt*` tools) was removed in step 1. The project is
 installed from source and is not published to npm (`"private": true`).
 
 Build status: all build steps (1-7) are done; 2.0.0 is on `main`. No npm
-package (decision recorded in `docs/DESIGN-v2.md` section 10). The server exposes `start_task` (worktree by default, or
+package (decision recorded in `docs/DESIGN-v2.md` section 10). Next planned work: network mode (HTTP over the tailnet on a Proxmox
+VM), steps N1–N5 in `docs/DESIGN-v2.md` section 12; start by asking the open
+decisions in 12.8. The server exposes `start_task` (worktree by default, or
 in_place), `get_task`, `wait_task`, `get_events`, `send_message`,
 `get_diff`, `cancel_task`, `close_task`, `list_tasks`, and `ask`.
 
