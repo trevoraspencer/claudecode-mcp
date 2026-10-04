@@ -37,6 +37,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it through gh's git credential helper; tasks never receive it.
 - GitHub tokens (`GH_TOKEN`, `GITHUB_TOKEN`, and `ghp_`/`github_pat_`
   shapes) are redacted from errors and logs.
+- Managed clones of private repos are cloned and fetched with the server's
+  `GH_TOKEN`. GitHub tokens are removed from all other git and gh
+  processes, and remote operations on managed clones run with hooks and
+  fsmonitor off and only gh as credential helper.
 
 ## [2.0.0] - 2026-10-03
 

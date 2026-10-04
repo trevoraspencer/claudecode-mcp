@@ -18,7 +18,7 @@ import {
   nestedWorktrees,
   ghBin,
   git,
-  pushArgs,
+  assertNoRemoteRewrites,
   removeWorktree,
   repoTop,
   run,
@@ -49,6 +49,7 @@ import {
   addAskWorktree,
   assertCloneOrigin,
   checkRepoUrl,
+  pushManagedBranch,
   removeAskWorktree,
   resolveRemoteBase,
   withManagedClone,
@@ -772,6 +773,7 @@ export class TaskService {
         // fetched: never push anywhere but the allowlisted URL.
         try {
           await assertCloneOrigin(root, wt.repo_url);
+          await assertNoRemoteRewrites(root);
         } catch (err) {
           throw new ToolError(`${(err as Error).message}; nothing was pushed`);
         }
@@ -786,10 +788,16 @@ export class TaskService {
 
       if (action === "push_pr") {
         try {
-          await git(pushArgs(branch, this.env), exists ? worktree : root, {
-            env: this.env,
-            timeoutMs: 120_000,
-          });
+          if (wt.repo_url) {
+            await pushManagedBranch(this.config, this.env, root, wt.repo_url, branch);
+          } else {
+            // A local repo: the user's own remote, credentials, and hooks.
+            await git(
+              ["push", "-u", "origin", `refs/heads/${branch}:refs/heads/${branch}`],
+              exists ? worktree : root,
+              { env: this.env, timeoutMs: 120_000, keepTokens: true },
+            );
+          }
         } catch (err) {
           throw new ToolError(
             `push failed: ${(err as Error).message}. The task is "closing"; fix the remote and call close_task again.`,
@@ -835,6 +843,17 @@ export class TaskService {
       ? `\n\n${redactSecrets(cap(s.result.text, 5_000), secrets)}`
       : "";
     const body = `Opened by claudecode-mcp from task \`${s.id}\`.${summary}`;
+    // For a managed clone, run gh outside the task-writable clone and name
+    // the repo explicitly; a local repo keeps the old in-repo behavior.
+    let repoFlag: string[] = [];
+    if (s.workspace?.repo_url) {
+      cwd = realpathSync.native(tmpdir());
+      const u = parseRepoUrl(s.workspace.repo_url, { allowFile: true });
+      if (u.scheme !== "file") {
+        const name = u.segments.join("/");
+        repoFlag = [`--repo=${u.host === "github.com" ? name : `${u.host}/${name}`}`];
+      }
+    }
     let r;
     try {
       r = await run(
@@ -844,13 +863,14 @@ export class TaskService {
           "pr",
           "create",
           "--draft",
+          ...repoFlag,
           `--head=${branch}`,
           ...(s.workspace?.base_branch ? [`--base=${s.workspace.base_branch}`] : []),
           `--title=${title}`,
           `--body=${body}`,
         ],
         cwd,
-        { env: this.env, timeoutMs: 60_000 },
+        { env: this.env, timeoutMs: 60_000, keepTokens: true },
       );
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === "ENOENT") {

@@ -182,9 +182,13 @@ Tests live in `test/` and import compiled modules from `dist/`.
   `prune-workspaces` never touches a folder without the marker and never
   drops worktrees or (without `--force`) unpushed commits.
 - Only the server pushes. `GH_TOKEN`/`GITHUB_TOKEN` stay out of the child
-  env allowlist; `push_pr` uses them through `pushArgs` (gh as credential
-  helper for that one push, explicit task-branch refspec). A `repo_url`
-  push re-checks the clone's origin first (`assertCloneOrigin`).
+  env allowlist and are stripped from every git/gh process unless the call
+  passes `keepTokens` (managed-clone clone/fetch/push, and gh). Those calls
+  use `remoteConfigArgs` (no hooks, no fsmonitor, credential helpers cleared
+  before gh). A `repo_url` push runs under the repo lock, re-checks the
+  clone's origin (`assertCloneOrigin`), refuses local remote rewrites
+  (`assertNoRemoteRewrites`), and pushes only the task branch to the
+  verified URL. gh for a managed clone runs outside it with `--repo`.
 - `ask` is read-only unless `writable: true` (plan mode plus blocked file
   tools). Without `repo` it runs in a fresh temp folder that is removed
   afterwards.

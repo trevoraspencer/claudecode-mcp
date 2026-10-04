@@ -29,7 +29,16 @@ import {
 import { rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { Config } from "./config.js";
-import { assertRef, ensureWorktreeExclude, git, GitError, run } from "./git.js";
+import {
+  assertNoRemoteRewrites,
+  assertRef,
+  ensureWorktreeExclude,
+  git,
+  GitError,
+  pushArgs,
+  remoteConfigArgs,
+  run,
+} from "./git.js";
 import { withRepoLock } from "./launcher.js";
 import { errorLog } from "./log.js";
 import { tasksDir } from "./paths.js";
@@ -169,23 +178,36 @@ export async function syncClone(
       throw new WorkspaceError(`${clone} exists but is not a managed clone; remove it`);
     }
     await assertCloneOrigin(clone, url.canonical);
-    await git(["fetch", "--prune", "--no-recurse-submodules", "origin"], clone, {
-      env: remoteEnv(env),
-      timeoutMs: FETCH_TIMEOUT_MS,
-    });
+    await assertNoRemoteRewrites(clone);
+    const remote = { env: remoteEnv(env), timeoutMs: FETCH_TIMEOUT_MS, keepTokens: true };
+    await git(
+      [...remoteConfigArgs(env), "fetch", "--prune", "--no-recurse-submodules", "origin"],
+      clone,
+      remote,
+    );
     // Follow a changed default branch; a failure keeps the old origin/HEAD.
-    await run("git", ["remote", "set-head", "origin", "--auto"], clone, {
-      env: remoteEnv(env),
-      timeoutMs: FETCH_TIMEOUT_MS,
-    }).catch(() => {});
+    await run(
+      "git",
+      [...remoteConfigArgs(env), "remote", "set-head", "origin", "--auto"],
+      clone,
+      remote,
+    ).catch(() => {});
     return "fetched";
   }
   const tmp = join(parent, `${TEMP_CLONE_PREFIX}${randomBytes(6).toString("hex")}`);
   try {
     await git(
-      ["clone", "--no-checkout", "--no-recurse-submodules", "--", url.cloneUrl, tmp],
+      [
+        ...remoteConfigArgs(env),
+        "clone",
+        "--no-checkout",
+        "--no-recurse-submodules",
+        "--",
+        url.cloneUrl,
+        tmp,
+      ],
       parent,
-      { env: remoteEnv(env), timeoutMs: CLONE_TIMEOUT_MS },
+      { env: remoteEnv(env), timeoutMs: CLONE_TIMEOUT_MS, keepTokens: true },
     );
     await git(["config", "--local", MANAGED_KEY, url.canonical], tmp);
     // Detach HEAD and drop the local default branch: it would never be
@@ -235,9 +257,18 @@ export async function resolveRemoteBase(
       ? { sha: head, branch: name }
       : { sha: head };
   }
+  if (baseRef === "HEAD") return resolveRemoteBase(clone);
   assertRef(baseRef);
-  const remote = await tryRef(`refs/remotes/origin/${baseRef}`);
+  // Only an exact remote branch name is a PR base (not `main~1` or `main^`).
+  const exact = await run(
+    "git",
+    ["show-ref", "--verify", "--quiet", `refs/remotes/origin/${baseRef}`],
+    clone,
+  );
+  const remote = exact.code === 0 ? await tryRef(`refs/remotes/origin/${baseRef}`) : undefined;
   if (remote) return { sha: remote, branch: baseRef };
+  const expr = await tryRef(`refs/remotes/origin/${baseRef}`);
+  if (expr) return { sha: expr };
   for (const ref of [`refs/tags/${baseRef}`, baseRef]) {
     const sha = await tryRef(ref);
     if (sha) return { sha };
@@ -257,6 +288,32 @@ export async function withManagedClone<T>(
   return lockRepo(ws, clone, async () => {
     await syncClone(url, clone, ws, env);
     return fn(clone);
+  });
+}
+
+/**
+ * Push a task branch from a managed clone, under the repo lock: re-check the
+ * clone's marker and origin, refuse remote rewrites, then push to the
+ * verified origin URL given explicitly, with hooks off and the server token
+ * only for gh's credential helper.
+ */
+export async function pushManagedBranch(
+  config: Config,
+  env: NodeJS.ProcessEnv,
+  clone: string,
+  canonical: string,
+  branch: string,
+): Promise<void> {
+  const ws = ensureWorkspacesDir(config);
+  await lockRepo(ws, clone, async () => {
+    await assertCloneOrigin(clone, canonical);
+    await assertNoRemoteRewrites(clone);
+    const url = (await configGet(clone, "remote.origin.url"))!;
+    await git(pushArgs(branch, url, env), clone, {
+      env: remoteEnv(env),
+      timeoutMs: 120_000,
+      keepTokens: true,
+    });
   });
 }
 

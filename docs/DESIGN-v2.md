@@ -638,6 +638,19 @@ task is marked `closing`); `GH_TOKEN`, `GITHUB_TOKEN`, and `ghp_`/`gho_`/
 `github_pat_` shapes are redacted. VM setup (token, ruleset on the default
 branch) goes in N4.
 
+The review before merge changed: GitHub tokens are removed from every git
+and gh process unless the call needs them (`toolEnv`), because git runs
+task-writable config (hooks, fsmonitor, helpers); clone, fetch, and push of
+a managed clone run with `core.hooksPath=/dev/null`, `core.fsmonitor=false`,
+`--no-verify` for push, and, with a server token, `credential.helper=`
+first (clearing planted helpers, which would get the token on `store`)
+then gh; the push goes to the verified origin URL given explicitly (no
+`pushurl`), under the repo lock, after refusing local `url.*.insteadOf` /
+`pushInsteadOf`, includes, and `remote.origin.pushurl`; gh runs outside the
+clone with `--repo`; private repos are cloned and fetched with the same
+token; only an exact remote branch name becomes `--base` (`main~1` does
+not; `HEAD` means the default branch).
+
 First plan:
 
 - If **push + draft PRs**: the VM holds a fine-grained GitHub token (or
@@ -690,5 +703,12 @@ only. The options as asked:
   through Claude in `auto` mode. Keep the VM single-purpose, keep tokens
   per device, and use tailnet ACLs.
 - The subscription login lives on the VM; treat the VM disk as sensitive.
+- Tasks run as the same Unix user as the server. A task that wants the
+  server's `GH_TOKEN` can read it from `/proc/<server-pid>/environ` (or the
+  service's files). Server-only push stops accidental and casual use (no
+  token in the task env, none handed to task-controlled hooks or helpers),
+  not a determined task. Limit the PAT to the allowlisted repos, protect
+  default branches with a ruleset, and set a renewal date. A hard boundary
+  would need tasks under a separate user (not planned).
 - Paths in responses are VM paths; callers must use `get_diff` or git to see
   results, not local file reads.

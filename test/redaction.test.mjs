@@ -71,3 +71,11 @@ test("GitHub tokens are redacted by value and by shape", () => {
     delete process.env.GH_TOKEN;
   }
 });
+
+test("full-length GitHub token shapes are redacted", () => {
+  const pat = "github_pat_" + "A1b2C3d4E5f6G7h8I9j0K1_" + "x".repeat(59);
+  for (const tok of ["ghp_" + "a".repeat(36), "ghs_" + "B".repeat(36), pat]) {
+    const out = redactSecrets(`push https://x-access-token:${tok}@github.com/o/r failed`);
+    assert.doesNotMatch(out, new RegExp(tok.slice(12, 30)), tok.slice(0, 12));
+  }
+});

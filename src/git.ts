@@ -46,9 +46,22 @@ export interface RunResult {
   truncated?: boolean;
 }
 
-function toolEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+/**
+ * GitHub tokens in the server's environment (the push credential, N3). git and
+ * gh read task-writable config (hooks, fsmonitor, helpers), so these are
+ * removed from every git/gh process unless a call asks for them.
+ */
+export const GITHUB_TOKEN_VARS = [
+  "GH_TOKEN",
+  "GITHUB_TOKEN",
+  "GH_ENTERPRISE_TOKEN",
+  "GITHUB_ENTERPRISE_TOKEN",
+] as const;
+
+function toolEnv(env: NodeJS.ProcessEnv, keepTokens = false): NodeJS.ProcessEnv {
   const out: NodeJS.ProcessEnv = { ...env, GIT_TERMINAL_PROMPT: "0", GH_PROMPT_DISABLED: "1" };
   for (const key of GIT_REDIRECT_VARS) delete out[key];
+  if (!keepTokens) for (const key of GITHUB_TOKEN_VARS) delete out[key];
   // GIT_TERMINAL_PROMPT does not cover ssh, which prompts on /dev/tty.
   if (!out.GIT_SSH_COMMAND) out.GIT_SSH_COMMAND = "ssh -o BatchMode=yes";
   return out;
@@ -63,12 +76,12 @@ export function run(
   cmd: string,
   args: readonly string[],
   cwd: string,
-  opts: { env?: NodeJS.ProcessEnv; timeoutMs?: number } = {},
+  opts: { env?: NodeJS.ProcessEnv; timeoutMs?: number; keepTokens?: boolean } = {},
 ): Promise<RunResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, {
       cwd,
-      env: toolEnv(opts.env ?? process.env),
+      env: toolEnv(opts.env ?? process.env, opts.keepTokens === true),
       // A new session has no controlling terminal and stdin is closed, so
       // nothing (ssh, credential helpers, editors) can prompt the user.
       detached: true,
@@ -138,7 +151,7 @@ function killTree(pid: number | undefined): void {
 export async function git(
   args: readonly string[],
   cwd: string,
-  opts: { env?: NodeJS.ProcessEnv; timeoutMs?: number } = {},
+  opts: { env?: NodeJS.ProcessEnv; timeoutMs?: number; keepTokens?: boolean } = {},
 ): Promise<string> {
   const r = await run("git", args, cwd, opts);
   if (r.code !== 0) {
@@ -324,18 +337,74 @@ export function ghBin(env: NodeJS.ProcessEnv = process.env): string {
   return env[GH_BIN_ENV] || "gh";
 }
 
+export function hasServerToken(env: NodeJS.ProcessEnv): boolean {
+  return GITHUB_TOKEN_VARS.some((k) => !!env[k]);
+}
+
 /**
- * argv for pushing a task branch. When the server has `GH_TOKEN` (or
- * `GITHUB_TOKEN`) in its own environment, this one push also gets gh as a
- * git credential helper, so https pushes use the server's token. Tasks never
- * see that variable (it is not in the child allowlist), so only the server
- * can push. The refspec is explicit: the task branch, nothing else.
+ * `-c` flags for git commands that talk to a managed clone's remote (clone,
+ * fetch, push) while the server's token is in their environment. The clone's
+ * config is task-writable, so: no hooks, no fsmonitor, and the credential
+ * helper list is cleared first (a planted helper would otherwise get the
+ * token on `store`) before gh is added as the only helper. gh is used only
+ * when its path is plain (the helper string goes through a shell).
  */
-export function pushArgs(branch: string, env: NodeJS.ProcessEnv = process.env): string[] {
+export function remoteConfigArgs(env: NodeJS.ProcessEnv = process.env): string[] {
   const gh = ghBin(env);
   const helper =
-    (env.GH_TOKEN || env.GITHUB_TOKEN) && /^[A-Za-z0-9_./-]+$/.test(gh)
-      ? ["-c", `credential.helper=!${gh} auth git-credential`]
+    hasServerToken(env) && /^[A-Za-z0-9_./-]+$/.test(gh)
+      ? ["-c", "credential.helper=", "-c", `credential.helper=!${gh} auth git-credential`]
       : [];
-  return [...helper, "push", "-u", "origin", `refs/heads/${branch}:refs/heads/${branch}`];
+  return ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", ...helper];
+}
+
+/**
+ * argv for pushing a managed clone's task branch to `url` (the verified
+ * origin URL, given explicitly so `pushurl` cannot redirect it). Only the task
+ * branch is pushed.
+ */
+export function pushArgs(
+  branch: string,
+  url: string,
+  env: NodeJS.ProcessEnv = process.env,
+): string[] {
+  return [
+    ...remoteConfigArgs(env),
+    "push",
+    "--no-verify",
+    "--",
+    url,
+    `refs/heads/${branch}:refs/heads/${branch}`,
+  ];
+}
+
+/**
+ * Refuse config that rewrites where a managed clone talks to: `url.*.
+ * insteadOf` / `pushInsteadOf`, includes, and `remote.origin.pushurl` in the
+ * clone's own (local or worktree) config. Operator-wide (global) settings
+ * are left alone.
+ */
+export async function assertNoRemoteRewrites(dir: string): Promise<void> {
+  const r = await run(
+    "git",
+    [
+      "config",
+      "--show-scope",
+      "--get-regexp",
+      "^(url\\..*\\.(insteadof|pushinsteadof)|include\\.path|includeif\\..*\\.path|remote\\.origin\\.pushurl)$",
+    ],
+    dir,
+  );
+  if (r.code !== 0 && r.code !== 1) {
+    throw new GitError(`git config check failed: ${r.stderr.trim().slice(0, 300)}`);
+  }
+  const local = r.stdout
+    .split("\n")
+    .filter((l) => /^(local|worktree)\t/.test(l))
+    .map((l) => l.split("\t")[1]?.split(" ")[0] ?? "");
+  if (local.length > 0) {
+    throw new GitError(
+      `the clone's config rewrites its remote (${[...new Set(local)].join(", ").slice(0, 300)}); remove those settings`,
+    );
+  }
 }
