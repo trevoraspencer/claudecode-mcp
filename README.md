@@ -60,6 +60,27 @@ Or in a client's JSON config:
 Optional: `npm link` in the clone puts a `claudecode-mcp` command on your
 `PATH`. After `git pull`, run `npm ci && npm run build` again.
 
+### HTTP mode (for a server on your tailnet)
+
+`claudecode-mcp --http` serves the same tools over HTTP instead of stdio.
+It listens on `127.0.0.1:8787` only, so put
+[`tailscale serve`](https://tailscale.com/kb/1312/serve) in front of it to
+reach it from other machines. Every request needs a bearer token; make one
+per client device:
+
+```sh
+claudecode-mcp token add macbook    # prints the token once
+claudecode-mcp token list
+claudecode-mcp token revoke macbook # takes effect at once
+```
+
+(Without `npm link`, run `node dist/cli.js token ...` and
+`node dist/cli.js --http` from the clone.)
+
+Add the server's tailnet name to `http.allowed_hosts` (see Configuration).
+Full VM setup and client registration are being written up as part of the
+network-mode plan (`docs/DESIGN-v2.md` section 12).
+
 ## Tools
 
 | Tool | What it does |
@@ -137,6 +158,12 @@ error.
 | `stall_minutes` | 10 | Flag a turn as `stalled` after this long without events. |
 | `idle_minutes` | 15 | Keep an idle `claude` alive this long for fast follow-ups. |
 | `max_events_mb` | 100 | Cap on a task's transcript; reaching it stops the task. |
+| `http.host` | `127.0.0.1` | HTTP mode listen address. Loopback only (`127.0.0.1`, `::1`, `localhost`). |
+| `http.port` | 8787 | HTTP mode port. |
+| `http.path` | `/mcp` | MCP endpoint path. `GET /healthz` is always there, without auth. |
+| `http.allowed_hosts` | `[]` | Extra `Host` names to accept, e.g. `vm.tail1234.ts.net`. Loopback names are always accepted. |
+| `http.allowed_origins` | `[]` | Browser origins to accept. Requests with any other `Origin` are refused. |
+| `http.tokens_file` | `http-tokens.json` next to config.json | Per-device token hashes (mode 0600). |
 
 ### Profiles
 
@@ -175,6 +202,10 @@ and skills.
   refuses to start tasks, and profiles cannot reset that marker.
 - **Environment:** the child gets an explicit allowlist of variables, never
   your whole environment. Host-session variables are never passed.
+- **HTTP mode:** loopback only, a per-device bearer token on every request
+  (checked in constant time; only hashes are stored), Host and Origin
+  checks, and an 8 MiB body cap. Anyone with a token can run Claude Code on
+  that machine, so give each device its own token and revoke lost ones.
 - **Data:** task state lives in `~/.local/state/claudecode-mcp` (mode 0700).
   Errors sent to clients are redacted.
 
@@ -202,6 +233,7 @@ server restarts. A restarted server finds them on disk.
 | `CLAUDECODE_MCP_EXTRA_ENV` | Comma-separated extra variables to pass to the child. |
 | `CLAUDECODE_MCP_FORWARD_DANGEROUS` | `1` passes request-altering variables such as `ANTHROPIC_CUSTOM_HEADERS`. |
 | `CLAUDECODE_MCP_DISPATCH_MS` | Queue dispatcher interval (default 2000). |
+| `CLAUDECODE_MCP_HTTP_GRACE_MS` | HTTP mode: how long SIGTERM waits for in-flight requests (default 10000). |
 | `DEBUG=claudecode-mcp` | Structured debug logs on stderr. |
 
 ## Troubleshooting

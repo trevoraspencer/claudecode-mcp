@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- HTTP mode: `claudecode-mcp --http` serves MCP as stateless Streamable
+  HTTP on loopback (`http.host`, default `127.0.0.1:8787/mcp`), for use
+  behind `tailscale serve` (see `docs/DESIGN-v2.md` section 12). Every
+  request needs a per-device bearer token and passes Host and Origin checks;
+  bodies are capped at 8 MiB; `GET /healthz` needs no auth. `ask` progress
+  streams as SSE. SIGTERM lets in-flight requests finish (up to 10 s).
+  stdio stays the default.
+- `claudecode-mcp token add <device>`, `token list`, `token revoke <device>`
+  manage per-device tokens. Only SHA-256 hashes are stored, in a 0600
+  `http-tokens.json` next to config.json; a running server picks up
+  changes at once.
+
 ## [2.0.0] - 2026-10-03
 
 A rewrite: `claudecode-mcp` is now an async task runner for Claude Code

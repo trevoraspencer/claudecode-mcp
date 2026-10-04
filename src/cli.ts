@@ -3,6 +3,9 @@
  * Package entry point (`claudecode-mcp`).
  *
  *   claudecode-mcp              start the stdio MCP server
+ *   claudecode-mcp --http       start the HTTP MCP server (DESIGN-v2 section 12)
+ *   claudecode-mcp token add|list|revoke
+ *                               manage per-device bearer tokens for --http
  *   claudecode-mcp runner <id>  run one task (started detached by the server)
  *   claudecode-mcp list-personal-config
  *                               print personal hooks and skills for profiles
@@ -11,6 +14,9 @@
 
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { loadConfig } from "./config.js";
+import { runHttp } from "./http.js";
+import { addToken, readTokens, revokeToken, tokensFilePath } from "./http-tokens.js";
 import { fatalLog } from "./log.js";
 import { redactSecrets } from "./redaction.js";
 import { describePersonalConfig } from "./profile.js";
@@ -19,7 +25,8 @@ import { getPackageVersion, serve } from "./server.js";
 
 export const MIN_NODE_MAJOR = 22;
 
-const USAGE = `usage: claudecode-mcp [--version | --help]
+const USAGE = `usage: claudecode-mcp [--http | --version | --help]
+       claudecode-mcp token add <device-name> | token list | token revoke <device-name>
        claudecode-mcp list-personal-config
        claudecode-mcp runner <task-id>`;
 
@@ -47,6 +54,15 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
     case undefined:
       await serve();
       return 0;
+    case "--http":
+      if (rest.length !== 0) {
+        process.stderr.write(USAGE + "\n");
+        return 2;
+      }
+      await runHttp();
+      return 0;
+    case "token":
+      return tokenCommand(rest);
     case "--version":
     case "-v":
       process.stdout.write(getPackageVersion() + "\n");
@@ -69,6 +85,34 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
       process.stderr.write(`unknown command: ${String(cmd).slice(0, 100)}\n${USAGE}\n`);
       return 2;
   }
+}
+
+/** `token add|list|revoke`: manage the per-device tokens file for --http. */
+function tokenCommand(args: readonly string[]): number {
+  const [sub, name, ...extra] = args;
+  const needsName = sub === "add" || sub === "revoke";
+  if (extra.length > 0 || (needsName ? !name : name !== undefined || sub !== "list")) {
+    process.stderr.write(USAGE + "\n");
+    return 2;
+  }
+  const path = tokensFilePath(loadConfig().config);
+  if (sub === "list") {
+    const tokens = readTokens(path);
+    for (const t of tokens) process.stdout.write(`${t.name}\t${t.created_at}\n`);
+    if (tokens.length === 0) process.stderr.write(`no tokens in ${path}\n`);
+    return 0;
+  }
+  if (sub === "add") {
+    const token = addToken(path, name!);
+    process.stdout.write(token + "\n");
+    process.stderr.write(
+      `Added token for "${name}" to ${path}. It is shown only once; store it on that device.\n`,
+    );
+    return 0;
+  }
+  revokeToken(path, name!);
+  process.stderr.write(`Revoked "${name}". A running --http server stops accepting it at once.\n`);
+  return 0;
 }
 
 /**

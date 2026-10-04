@@ -4,7 +4,7 @@ Canonical public guide for AI agents and contributors working in this repository
 
 ## Project purpose
 
-`claudecode-mcp` v2 is a stdio MCP server that runs Claude Code as an **async
+`claudecode-mcp` v2 is an MCP server (stdio by default, HTTP with `--http`) that runs Claude Code as an **async
 task runner**. Any MCP client can hand coding work or a review to Claude Code,
 track progress, steer it, and collect the result.
 
@@ -14,9 +14,9 @@ v1 (one-shot `claude_prompt*` tools) was removed in step 1. The project is
 installed from source and is not published to npm (`"private": true`).
 
 Build status: all build steps (1-7) are done; 2.0.0 is on `main`. No npm
-package (decision recorded in `docs/DESIGN-v2.md` section 10). Next planned work: network mode (HTTP over the tailnet on a Proxmox
-VM), steps N1–N5 in `docs/DESIGN-v2.md` section 12; start by asking the open
-decisions in 12.8. The server exposes `start_task` (worktree by default, or
+package (decision recorded in `docs/DESIGN-v2.md` section 10). Current work: network mode (HTTP over the tailnet on a Proxmox
+VM), steps N1–N5 in `docs/DESIGN-v2.md` section 12. The 12.8 decisions are
+taken; N1 (HTTP transport and auth) is done; N2 (repos by URL) is next. The server exposes `start_task` (worktree by default, or
 in_place), `get_task`, `wait_task`, `get_events`, `send_message`,
 `get_diff`, `cancel_task`, `close_task`, `list_tasks`, and `ask`.
 
@@ -57,7 +57,8 @@ runs `npm pack --dry-run`.
 
 ## Architecture map
 
-- `src/cli.ts` - package entry (`bin`). No args starts the MCP server;
+- `src/cli.ts` - package entry (`bin`). No args starts the stdio MCP server;
+  `--http` the HTTP server; `token add|list|revoke` manages HTTP tokens;
   `runner <task-id>` runs one task's runner. Refuses Node < 22 and Windows.
 - `src/runner.ts` - the detached per-task runner: owns the `claude` child,
   events.jsonl, task.json updates, the socket, timers, interrupt and stop.
@@ -68,8 +69,12 @@ runs `npm pack --dry-run`.
 - `src/claude-args.ts` - the `claude` argv (all flag decisions in one place).
 - `src/profile.ts` - profile references (personal hooks and skills, plugin
   dirs, settings files, config_dir): checks and per-task generated files.
-- `src/server.ts` - stdio MCP server: startup (`prepare`), tool schemas and
-  registration.
+- `src/server.ts` - MCP server: startup (`prepare`), the shared
+  `TaskService` with background work (`createTaskService`), tool schemas and
+  registration (`createServer`), stdio entry (`serve`).
+- `src/http.ts` - HTTP mode: loopback listener, Host/Origin/token checks,
+  body cap, one stateless `McpServer` per request, graceful shutdown.
+- `src/http-tokens.ts` - per-device token file (hashes, 0600) and lookup.
 - `src/service.ts` - the task operations behind the tools (`TaskService`).
 - `src/compact.ts` - compact steps and event pages from events.jsonl.
 - `src/repo.ts` - `repo` path checks against `allowed_roots` (realpath).
@@ -94,6 +99,8 @@ Tests live in `test/` and import compiled modules from `dist/`.
   `~/.config/...`). Override: `CLAUDECODE_MCP_CONFIG`.
 - State: `$XDG_STATE_HOME/claudecode-mcp/` (default `~/.local/state/...`),
   with `tasks/<task-id>/` per task. Override: `CLAUDECODE_MCP_STATE_DIR`.
+- HTTP tokens: `http-tokens.json` next to the config file, or
+  `http.tokens_file`. Hashes only; mode 0600.
 - `claude` binary: `claude` on `PATH`. Override: `CLAUDECODE_MCP_CLAUDE_BIN`.
 - Personal Claude home (source of `personal_hooks` / `personal_skills`):
   `$CLAUDE_CONFIG_DIR` or `~/.claude`. `claudecode-mcp list-personal-config`
@@ -182,6 +189,16 @@ Tests live in `test/` and import compiled modules from `dist/`.
   to stdout (stdout is the MCP transport).
 - Keep every resource bounded: time caps, output and event-file caps, config
   size cap.
+- HTTP mode listens on loopback only (`http.host` cannot be anything else).
+  Every request except `GET /healthz` passes the Host check, the Origin
+  check, and a bearer token, in that order, before anything else is read.
+  Tokens are stored only as SHA-256 hashes in a private (0600, own user,
+  not a symlink) file, compared in constant time, and never logged. An
+  unsafe or broken tokens file accepts no token (fail closed). Request
+  bodies are capped (`MAX_BODY_BYTES`).
+- HTTP mode creates one `TaskService` per process (`createTaskService`) and
+  one `McpServer` per request. Never start recovery or the dispatcher per
+  request. `--http` refuses to start at depth >= 1.
 
 ## Testing guidance
 

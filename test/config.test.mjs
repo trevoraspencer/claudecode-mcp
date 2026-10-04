@@ -251,3 +251,35 @@ test("inline settings may not set reserved variables in env", () => {
     parseConfig({ profiles: { worker: { settings: { env: { FOO: "1" } } } } }),
   );
 });
+
+test("http block: defaults, loopback-only host, path and host checks", () => {
+  const d = parseConfig({}).http;
+  assert.deepEqual(d, {
+    host: "127.0.0.1",
+    port: 8787,
+    path: "/mcp",
+    allowed_hosts: [],
+    allowed_origins: [],
+  });
+  const c = parseConfig({
+    http: { port: 0, path: "/api/mcp", allowed_hosts: ["VM.Tail1234.ts.net."] },
+  }).http;
+  assert.equal(c.port, 0);
+  assert.equal(c.path, "/api/mcp");
+  assert.deepEqual(c.allowed_hosts, ["vm.tail1234.ts.net"]);
+  for (const bad of [
+    { host: "0.0.0.0" },
+    { host: "100.64.0.1" },
+    { port: 70000 },
+    { path: "mcp" },
+    { path: "/healthz" },
+    { path: "/a/../b" },
+    { allowed_hosts: ["evil.com:443"] },
+    { allowed_hosts: ["a b"] },
+    { allowed_origins: ["https://x.example/path"] },
+    { tokens_file: "relative.json" },
+    { bogus: 1 },
+  ]) {
+    assert.throws(() => parseConfig({ http: bad }), ConfigError, JSON.stringify(bad));
+  }
+});

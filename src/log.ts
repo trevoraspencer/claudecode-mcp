@@ -1,7 +1,7 @@
 /**
  * Structured stderr logging. stdout belongs to the MCP transport, so every
  * diagnostic is one JSON line on stderr. `debugLog` is gated by
- * `DEBUG=claudecode-mcp`; warnings and errors are always on.
+ * `DEBUG=claudecode-mcp`; info, warnings, and errors are always on.
  */
 
 export const LOG_TAG = "claudecode-mcp";
@@ -22,6 +22,10 @@ function write(level: string | undefined, event: Record<string, unknown>): void 
 
 export function debugLog(event: Record<string, unknown>): void {
   if (debugEnabled()) write(undefined, event);
+}
+
+export function infoLog(event: Record<string, unknown>): void {
+  write("info", event);
 }
 
 export function warnLog(event: Record<string, unknown>): void {

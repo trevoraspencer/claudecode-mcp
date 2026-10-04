@@ -132,6 +132,54 @@ export function builtinWorkerProfile(): Profile {
   return profileSchema.parse({});
 }
 
+/** Host names always accepted in the HTTP `Host` header. */
+export const LOOPBACK_HOSTS = ["localhost", "127.0.0.1", "::1"] as const;
+
+/** A DNS name or IP address as it appears in a `Host` header (no port). */
+const hostName = z
+  .string()
+  .min(1)
+  .max(253)
+  .regex(/^(?:[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.?|[0-9A-Fa-f:]+)$/, "must be a host name")
+  .transform((h) => h.toLowerCase().replace(/\.$/, ""));
+
+/**
+ * HTTP mode (`claudecode-mcp --http`, DESIGN-v2 section 12.4). The server
+ * listens on loopback only; `tailscale serve` publishes it on the tailnet.
+ */
+export const httpSchema = z.strictObject({
+  host: z.enum(["127.0.0.1", "::1", "localhost"]).default("127.0.0.1"),
+  port: z.int().min(0).max(65_535).default(8787),
+  path: z
+    .string()
+    .regex(/^\/[A-Za-z0-9._~-]+(?:\/[A-Za-z0-9._~-]+)*$/, "must be an absolute URL path like /mcp")
+    .refine((p) => !p.split("/").some((seg) => seg === "." || seg === ".."), "no . or .. segments")
+    .refine((p) => p !== "/healthz", "/healthz is reserved")
+    .default("/mcp"),
+  /** Extra `Host` header names to accept, e.g. the VM's `<vm>.<tailnet>.ts.net`. */
+  allowed_hosts: z.array(hostName).max(64).default([]),
+  /** Browser origins to accept. Empty: any request with an `Origin` header is refused. */
+  allowed_origins: z
+    .array(
+      z
+        .string()
+        .max(512)
+        .refine((o) => {
+          try {
+            return new URL(o).origin === o;
+          } catch {
+            return false;
+          }
+        }, "must be an origin like https://host"),
+    )
+    .max(64)
+    .default([]),
+  /** Per-device bearer tokens (hashes). Default: `http-tokens.json` next to config.json. */
+  tokens_file: pathString.optional(),
+});
+
+export type HttpConfig = z.output<typeof httpSchema>;
+
 export const configSchema = z
   .strictObject({
     $schema: z.string().optional(),
@@ -161,6 +209,7 @@ export const configSchema = z
     stale_days: z.int().min(1).max(365).default(7),
     default_profile: profileName.default(DEFAULT_PROFILE_NAME),
     profiles: z.record(profileName, profileSchema).default({}),
+    http: httpSchema.default(httpSchema.parse({})),
   })
   .transform((c) => {
     const { $schema: _schema, ...rest } = c;
