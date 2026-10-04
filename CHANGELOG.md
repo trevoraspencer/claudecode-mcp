@@ -7,7 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-v2 rebuild in progress (see `docs/DESIGN-v2.md`). Will ship as 2.0.0.
+## [2.0.0] - 2026-10-03
+
+A rewrite: `claudecode-mcp` is now an async task runner for Claude Code
+(see `docs/DESIGN-v2.md` and the README). The date is the release-prep
+date; it moves to the publish date if publishing happens later.
 
 ### Changed (breaking)
 
@@ -72,6 +76,10 @@ v2 rebuild in progress (see `docs/DESIGN-v2.md`). Will ship as 2.0.0.
 - Node 20 from CI.
 
 ### Fixed
+
+These fixes landed in the v1 code before the rewrite; the parts that still
+apply (environment allowlist, process-group cleanup, redaction, bounded
+limits) were ported into 2.0.
 
 - Refreshed the lockfile to pick up patched transitive dependencies
   (`fast-uri` 3.1.8, `hono` 4.13.12, `ip-address` 10.7.3, `qs` 6.16.0),

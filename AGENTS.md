@@ -13,11 +13,10 @@ changing behavior. v2 is built in steps (design section 10), one PR per step.
 v1 (one-shot `claude_prompt*` tools) was removed in step 1 and lives on in the
 1.x releases on npm.
 
-Build status: steps 1-6 are done (skeleton, runner, core MCP tools,
-worktrees, profiles, recovery and queue). The server exposes `start_task` (worktree by default, or
+Build status: all build steps (1-7) are done; 2.0.0 is prepared but not
+published (see the release checklist in `docs/DESIGN-v2.md` section 10). The server exposes `start_task` (worktree by default, or
 in_place), `get_task`, `wait_task`, `get_events`, `send_message`,
-`get_diff`, `cancel_task`, `close_task`, `list_tasks`, and `ask`. Step 7
-(docs, live tests, 2.0.0 release prep) is next.
+`get_diff`, `cancel_task`, `close_task`, `list_tasks`, and `ask`.
 
 ## Core commands
 

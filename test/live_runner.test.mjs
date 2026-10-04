@@ -135,3 +135,48 @@ test(
     }
   },
 );
+
+test("live: interrupt a running turn and steer it", { skip: !live, timeout: 240_000 }, async () => {
+  const { sandbox, startServer } = await import("./_mcp.mjs");
+  const box = sandbox();
+  delete box.env.CLAUDECODE_MCP_CLAUDE_BIN;
+  const srv = await startServer(box.env);
+  try {
+    const start = await srv.call("start_task", {
+      prompt: "Write the numbers from 1 to 400 as English words, one per line. Do not use tools.",
+      repo: box.repo,
+      isolation: "in_place",
+      model: "sonnet",
+      effort: "low",
+    });
+    assert.equal(start.isError, false, start.text);
+    const id = start.json.task_id;
+    // Wait until the turn is producing output, then interrupt it.
+    for (let i = 0; i < 100; i++) {
+      const v = (await srv.call("get_task", { task_id: id, recent: 3 })).json;
+      if (v.recent.some((x) => x.kind === "text")) break;
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    const r = await srv.call("send_message", {
+      task_id: id,
+      text: "Stop counting. Reply with only the word: halted",
+      interrupt: true,
+    });
+    assert.equal(r.isError, false, r.text);
+    let v;
+    for (let i = 0; i < 40; i++) {
+      v = (await srv.call("wait_task", { task_id: id, timeout_s: 5 })).json;
+      if (!v.wait_timed_out && v.turns >= 2) break;
+    }
+    assert.match(v.result.text, /halted/i);
+    const page = (await srv.call("get_events", { task_id: id, limit: 200 })).json;
+    const results = page.events.filter((e) => e.type === "result").map((e) => e.steps[0]?.subtype);
+    assert.ok(
+      results.includes("error_during_execution") || results.length >= 2,
+      JSON.stringify(results),
+    );
+    await srv.call("cancel_task", { task_id: id });
+  } finally {
+    srv.stop();
+  }
+});
