@@ -431,6 +431,10 @@ Release as **2.0.0** (breaking). Rewrite `AGENTS.md` invariants to match.
    README config blocks), a live interrupt test, version 2.0.0, and the
    CHANGELOG `[2.0.0]` section.
 
+**Release decision (2026-10-04):** not publishing for now. 2.0.0 stays
+unpublished and untagged on `main`; no review date was set. Use the
+checklist below when that changes.
+
 **Release checklist (for the maintainer; not automated):**
 
 1. Open question 3: check Anthropic's current terms for using a
