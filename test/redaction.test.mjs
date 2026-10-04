@@ -57,3 +57,17 @@ test("sanitizeForClient redacts a secret the offset lands inside", () => {
     delete process.env.ANTHROPIC_AUTH_TOKEN;
   }
 });
+
+test("GitHub tokens are redacted by value and by shape", () => {
+  process.env.GH_TOKEN = "server-push-token-value";
+  try {
+    const out = redactSecrets(
+      "a server-push-token-value b ghp_" +
+        "A".repeat(36) +
+        " c github_pat_11ABCDEFG0123456789_abcdefghijklmnop d",
+    );
+    assert.equal(out, "a *** b gh*_*** c github_pat_*** d");
+  } finally {
+    delete process.env.GH_TOKEN;
+  }
+});

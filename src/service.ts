@@ -18,6 +18,7 @@ import {
   nestedWorktrees,
   ghBin,
   git,
+  pushArgs,
   removeWorktree,
   repoTop,
   run,
@@ -46,6 +47,7 @@ import { isInside, resolveRepo } from "./repo.js";
 import { parseRepoUrl } from "./repo-url.js";
 import {
   addAskWorktree,
+  assertCloneOrigin,
   checkRepoUrl,
   removeAskWorktree,
   resolveRemoteBase,
@@ -545,15 +547,12 @@ export class TaskService {
     if (url) {
       // Clone or fetch, then branch from the fresh remote ref, all under the
       // repo lock so no other task fetches into the clone meanwhile.
-      wt = await withManagedClone(url, this.config, this.env, async (clone) =>
-        createWorktree({
-          repo: clone,
-          top: clone,
-          taskId: id,
-          baseRef: await resolveRemoteBase(clone, input.base_ref),
-          title,
-        }),
-      );
+      let baseBranch: string | undefined;
+      wt = await withManagedClone(url, this.config, this.env, async (clone) => {
+        const base = await resolveRemoteBase(clone, input.base_ref);
+        baseBranch = base.branch;
+        return createWorktree({ repo: clone, top: clone, taskId: id, baseRef: base.sha, title });
+      });
       workspace = {
         isolation,
         repo_root: wt.repo_root,
@@ -562,6 +561,7 @@ export class TaskService {
         base_commit: wt.base_commit,
         title,
         repo_url: url.canonical,
+        ...(baseBranch ? { base_branch: baseBranch } : {}),
       };
     } else if (isolation === "worktree") {
       const repo = repoPath!;
@@ -767,6 +767,15 @@ export class TaskService {
           );
         }
       }
+      if (action === "push_pr" && wt.repo_url) {
+        // The task may have changed the shared clone's remote since it was
+        // fetched: never push anywhere but the allowlisted URL.
+        try {
+          await assertCloneOrigin(root, wt.repo_url);
+        } catch (err) {
+          throw new ToolError(`${(err as Error).message}; nothing was pushed`);
+        }
+      }
       const ignored = exists ? await ignoredPaths(worktree) : [];
 
       // Mark the task as closing before any slow step, so it can never be
@@ -777,7 +786,7 @@ export class TaskService {
 
       if (action === "push_pr") {
         try {
-          await git(["push", "-u", "origin", branch], exists ? worktree : root, {
+          await git(pushArgs(branch, this.env), exists ? worktree : root, {
             env: this.env,
             timeoutMs: 120_000,
           });
@@ -831,7 +840,15 @@ export class TaskService {
       r = await run(
         ghBin(this.env),
         // --flag=value, so a title starting with "-" is never read as a flag.
-        ["pr", "create", "--draft", `--head=${branch}`, `--title=${title}`, `--body=${body}`],
+        [
+          "pr",
+          "create",
+          "--draft",
+          `--head=${branch}`,
+          ...(s.workspace?.base_branch ? [`--base=${s.workspace.base_branch}`] : []),
+          `--title=${title}`,
+          `--body=${body}`,
+        ],
         cwd,
         { env: this.env, timeoutMs: 60_000 },
       );
@@ -1043,7 +1060,7 @@ export class TaskService {
         // A throwaway detached worktree at the fresh remote ref; removed below.
         askWorktree = await withManagedClone(url, this.config, this.env, async (clone) => ({
           clone,
-          path: await addAskWorktree(clone, await resolveRemoteBase(clone, input.base_ref)),
+          path: await addAskWorktree(clone, (await resolveRemoteBase(clone, input.base_ref)).sha),
         }));
         workdir = askWorktree.path;
       }

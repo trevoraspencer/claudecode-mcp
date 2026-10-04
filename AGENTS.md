@@ -16,8 +16,9 @@ installed from source and is not published to npm (`"private": true`).
 Build status: all build steps (1-7) are done; 2.0.0 is on `main`. No npm
 package (decision recorded in `docs/DESIGN-v2.md` section 10). Current work: network mode (HTTP over the tailnet on a Proxmox
 VM), steps N1–N5 in `docs/DESIGN-v2.md` section 12. The 12.8 decisions are
-taken; N1 (HTTP transport and auth) and N2 (repos by URL) are done; N3
-(results out: push + draft PRs) is next. The server exposes `start_task` (worktree by default, or
+taken; N1 (HTTP transport and auth), N2 (repos by URL), and N3 (results
+out: push + draft PRs) are done; N4 (VM deploy doc and systemd unit) is
+next. The server exposes `start_task` (worktree by default, or
 in_place), `get_task`, `wait_task`, `get_events`, `send_message`,
 `get_diff`, `cancel_task`, `close_task`, `list_tasks`, and `ask`.
 
@@ -180,6 +181,10 @@ Tests live in `test/` and import compiled modules from `dist/`.
   `claudecode-mcp.managed` marker and `origin` URL must match the request.
   `prune-workspaces` never touches a folder without the marker and never
   drops worktrees or (without `--force`) unpushed commits.
+- Only the server pushes. `GH_TOKEN`/`GITHUB_TOKEN` stay out of the child
+  env allowlist; `push_pr` uses them through `pushArgs` (gh as credential
+  helper for that one push, explicit task-branch refspec). A `repo_url`
+  push re-checks the clone's origin first (`assertCloneOrigin`).
 - `ask` is read-only unless `writable: true` (plan mode plus blocked file
   tools). Without `repo` it runs in a fresh temp folder that is removed
   afterwards.

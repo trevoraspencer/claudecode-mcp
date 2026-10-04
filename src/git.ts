@@ -323,3 +323,19 @@ export async function dirtyFiles(dir: string): Promise<string[]> {
 export function ghBin(env: NodeJS.ProcessEnv = process.env): string {
   return env[GH_BIN_ENV] || "gh";
 }
+
+/**
+ * argv for pushing a task branch. When the server has `GH_TOKEN` (or
+ * `GITHUB_TOKEN`) in its own environment, this one push also gets gh as a
+ * git credential helper, so https pushes use the server's token. Tasks never
+ * see that variable (it is not in the child allowlist), so only the server
+ * can push. The refspec is explicit: the task branch, nothing else.
+ */
+export function pushArgs(branch: string, env: NodeJS.ProcessEnv = process.env): string[] {
+  const gh = ghBin(env);
+  const helper =
+    (env.GH_TOKEN || env.GITHUB_TOKEN) && /^[A-Za-z0-9_./-]+$/.test(gh)
+      ? ["-c", `credential.helper=!${gh} auth git-credential`]
+      : [];
+  return [...helper, "push", "-u", "origin", `refs/heads/${branch}:refs/heads/${branch}`];
+}

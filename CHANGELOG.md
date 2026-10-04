@@ -30,6 +30,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   commits not on the remote.
 - `claudecode-mcp prune-workspaces [--dry-run] [--force]` removes managed
   clones that no open task uses, keeping ones with unpushed commits.
+- `close_task push_pr` on `repo_url` tasks opens the draft PR against the
+  branch the task started from (`--base`), re-checks the clone's remote
+  before pushing, and pushes only the task branch (explicit refspec). With
+  `GH_TOKEN` (or `GITHUB_TOKEN`) in the server's environment, the push uses
+  it through gh's git credential helper; tasks never receive it.
+- GitHub tokens (`GH_TOKEN`, `GITHUB_TOKEN`, and `ghp_`/`github_pat_`
+  shapes) are redacted from errors and logs.
 
 ## [2.0.0] - 2026-10-03
 

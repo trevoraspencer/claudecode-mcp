@@ -5,6 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   readdirSync,
@@ -15,6 +16,7 @@ import {
 import { join } from "node:path";
 
 import { CLI, sandbox, startServer } from "./_mcp.mjs";
+import { pushArgs } from "../dist/git.js";
 import { addToken, startHttpServer } from "./_http.mjs";
 
 const git = (cwd, ...args) => execFileSync("git", args, { cwd, stdio: "pipe" }).toString().trim();
@@ -317,4 +319,94 @@ test("close delete counts only the task's own commits, even after the base branc
   assert.equal(other.isError, false, other.text);
   const del = await s.call("close_task", { task_id: start.json.task_id, action: "delete" });
   assert.equal(del.isError, false, del.text);
+});
+
+test("pushArgs: explicit refspec; gh credential helper only with a server token", () => {
+  assert.deepEqual(pushArgs("claude/x-1", {}), [
+    "push",
+    "-u",
+    "origin",
+    "refs/heads/claude/x-1:refs/heads/claude/x-1",
+  ]);
+  assert.deepEqual(pushArgs("b", { GH_TOKEN: "t" }).slice(0, 2), [
+    "-c",
+    "credential.helper=!gh auth git-credential",
+  ]);
+  assert.deepEqual(
+    pushArgs("b", { GITHUB_TOKEN: "t", CLAUDECODE_MCP_GH_BIN: "/opt/gh/bin/gh" }).slice(0, 2),
+    ["-c", "credential.helper=!/opt/gh/bin/gh auth git-credential"],
+  );
+  // A gh path a shell could misread gets no helper (the push then uses git's own).
+  assert.equal(pushArgs("b", { GH_TOKEN: "t", CLAUDECODE_MCP_GH_BIN: "/x/g h;id" })[0], "push");
+});
+
+function fakeGh(dir) {
+  const bin = join(dir, "gh.sh");
+  const out = join(dir, "gh.args");
+  writeFileSync(
+    bin,
+    '#!/bin/sh\necho "$@" >> "$FAKE_GH_ARGS"\necho https://github.com/o/r/pull/7\n',
+  );
+  chmodSync(bin, 0o755);
+  return { bin, out };
+}
+
+test("push_pr opens the PR against the branch the task started from", async (t) => {
+  const pre = sandbox();
+  const gh = fakeGh(pre.dir);
+  const b = box({}, { CLAUDECODE_MCP_GH_BIN: gh.bin, FAKE_GH_ARGS: gh.out, GH_TOKEN: "srv" });
+  const s = await server(t, b);
+  git(b.src, "push", "-q", "origin", "main:feature");
+  git(b.src, "tag", "v1");
+  git(b.src, "push", "-q", "origin", "v1");
+  const cases = [
+    [{}, / --base=main $/],
+    [{ base_ref: "feature" }, / --base=feature $/],
+    [{ base_ref: "v1" }, /^ --draft --head=\S+ $/],
+  ];
+  for (const [extra, re] of cases) {
+    const start = await s.call("start_task", {
+      prompt: "WRITE c.txt hi\nCOMMIT add c\ndone",
+      repo_url: b.url,
+      ...extra,
+    });
+    assert.equal(start.isError, false, start.text);
+    await waitIdle(s, start.json.task_id);
+    const r = await s.call("close_task", { task_id: start.json.task_id, action: "push_pr" });
+    assert.equal(r.isError, false, r.text);
+    assert.equal(r.json.pr_url, "https://github.com/o/r/pull/7");
+    const line = readFileSync(gh.out, "utf8").split("pr create").at(-1).split("--title=")[0];
+    assert.match(line, re, JSON.stringify(extra));
+  }
+});
+
+test("push_pr refuses when the clone's origin changed, before closing", async (t) => {
+  const b = box();
+  const s = await server(t, b);
+  const start = await s.call("start_task", {
+    prompt: "WRITE d.txt hi\nCOMMIT add d\ndone",
+    repo_url: b.url,
+  });
+  await waitIdle(s, start.json.task_id);
+  const elsewhere = join(b.remotes, "evil.git");
+  execFileSync("git", ["init", "-q", "--bare", elsewhere]);
+  git(b.clone, "remote", "set-url", "origin", `file://${elsewhere}`);
+  const r = await s.call("close_task", { task_id: start.json.task_id, action: "push_pr" });
+  assert.equal(r.isError, true);
+  assert.match(r.text, /no longer points at .*nothing was pushed/);
+  assert.equal(git(elsewhere, "branch", "--list"), "");
+  const v = await s.call("get_task", { task_id: start.json.task_id });
+  assert.ok(!["closing", "closed"].includes(v.json.status), v.json.status);
+});
+
+test("tasks do not get the server's GH_TOKEN", async (t) => {
+  const pre = sandbox();
+  const envOut = join(pre.dir, "child-env.json");
+  const b = box({}, { GH_TOKEN: "server-only-token", CLAUDECODE_MCP_FAKE_ENV_OUT: envOut });
+  const s = await server(t, b);
+  const start = await s.call("start_task", { prompt: "x", repo_url: b.url });
+  await waitIdle(s, start.json.task_id);
+  const childEnv = JSON.parse(readFileSync(envOut, "utf8"));
+  assert.equal(childEnv.GH_TOKEN, undefined);
+  assert.doesNotMatch(JSON.stringify(childEnv), /server-only-token/);
 });

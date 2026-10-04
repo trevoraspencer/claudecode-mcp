@@ -138,7 +138,10 @@ each task.
 remote branch. `repo_url` tasks always get a worktree. Accepted URL forms:
 `https://host/owner/repo`, `ssh://user@host/owner/repo`, and
 `user@host:owner/repo`; `*` in a pattern matches within one path segment.
-Results come back through `get_diff` and `close_task` with `push_pr`.
+Results come back through `get_diff` and `close_task` with `push_pr`,
+which opens the draft PR against the branch the task started from. When the
+server has `GH_TOKEN` in its environment, it uses that token for the push
+and the PR; tasks never get it, so Claude itself cannot push.
 
 `claudecode-mcp prune-workspaces [--dry-run] [--force]` removes clones that
 no open task uses. It only touches clones it made, and keeps a clone with

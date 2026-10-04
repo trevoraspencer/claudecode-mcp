@@ -123,6 +123,28 @@ async function isManagedClone(dir: string): Promise<boolean> {
 }
 
 /**
+ * The clone's marker and `origin` must still name `canonical`. Checked before
+ * every fetch and before `push_pr`, so a remote changed after the allowlist
+ * check (by hand or by a task) is refused rather than followed.
+ */
+export async function assertCloneOrigin(clone: string, canonical: string): Promise<void> {
+  const marker = await configGet(clone, MANAGED_KEY);
+  const origin = await configGet(clone, "remote.origin.url");
+  let originCanonical: string | undefined;
+  try {
+    originCanonical = origin ? parseRepoUrl(origin, { allowFile: true }).canonical : undefined;
+  } catch {
+    originCanonical = undefined;
+  }
+  if (marker !== canonical || originCanonical !== canonical) {
+    throw new WorkspaceError(
+      `managed clone ${clone} no longer points at ${canonical} ` +
+        `(origin: ${(origin ?? "none").slice(0, 200)}); fix remote.origin.url or remove the clone`,
+    );
+  }
+}
+
+/**
  * Clone or fetch. Call only under the repo lock. A new clone is made in a
  * temp folder, marked, detached from its default branch, and then renamed
  * into place, so a failed clone leaves nothing.
@@ -146,20 +168,7 @@ export async function syncClone(
     if (!(await isManagedClone(clone))) {
       throw new WorkspaceError(`${clone} exists but is not a managed clone; remove it`);
     }
-    const marker = await configGet(clone, MANAGED_KEY);
-    const origin = await configGet(clone, "remote.origin.url");
-    let originCanonical: string | undefined;
-    try {
-      originCanonical = origin ? parseRepoUrl(origin, { allowFile: true }).canonical : undefined;
-    } catch {
-      originCanonical = undefined;
-    }
-    if (marker !== url.canonical || originCanonical !== url.canonical) {
-      throw new WorkspaceError(
-        `managed clone ${clone} no longer points at ${url.canonical} ` +
-          `(origin: ${(origin ?? "none").slice(0, 200)}); fix remote.origin.url or remove the clone`,
-      );
-    }
+    await assertCloneOrigin(clone, url.canonical);
     await git(["fetch", "--prune", "--no-recurse-submodules", "origin"], clone, {
       env: remoteEnv(env),
       timeoutMs: FETCH_TIMEOUT_MS,
@@ -198,11 +207,15 @@ export async function syncClone(
 }
 
 /**
- * The commit to start from. Default: the remote's default branch
- * (`origin/HEAD`). A branch name means the remote branch (`origin/<name>`);
- * tags and commits work as given.
+ * The commit to start from, and the remote branch it came from (the PR base
+ * for `push_pr`). Default: the remote's default branch (`origin/HEAD`). A
+ * branch name means the remote branch (`origin/<name>`); tags and commits
+ * work as given and have no branch.
  */
-export async function resolveRemoteBase(clone: string, baseRef?: string): Promise<string> {
+export async function resolveRemoteBase(
+  clone: string,
+  baseRef?: string,
+): Promise<{ sha: string; branch?: string }> {
   const tryRef = async (ref: string) => {
     const r = await run(
       "git",
@@ -216,12 +229,18 @@ export async function resolveRemoteBase(clone: string, baseRef?: string): Promis
     if (!head) {
       throw new WorkspaceError("the remote has no default branch (origin/HEAD); pass base_ref");
     }
-    return head;
+    const sym = await run("git", ["symbolic-ref", "-q", "refs/remotes/origin/HEAD"], clone);
+    const name = sym.stdout.trim().replace(/^refs\/remotes\/origin\//, "");
+    return sym.code === 0 && name && name !== sym.stdout.trim()
+      ? { sha: head, branch: name }
+      : { sha: head };
   }
   assertRef(baseRef);
-  for (const ref of [`refs/remotes/origin/${baseRef}`, `refs/tags/${baseRef}`, baseRef]) {
+  const remote = await tryRef(`refs/remotes/origin/${baseRef}`);
+  if (remote) return { sha: remote, branch: baseRef };
+  for (const ref of [`refs/tags/${baseRef}`, baseRef]) {
     const sha = await tryRef(ref);
-    if (sha) return sha;
+    if (sha) return { sha };
   }
   throw new GitError(`unknown git ref: ${baseRef}`);
 }

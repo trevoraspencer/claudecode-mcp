@@ -470,7 +470,7 @@ Tests: offline tests use a fake `claude` that emits stream-json; live tests
 
 Status: **being built** (started 2026-10-04), one PR per step (N1–N5), each
 with an independent review before merge, as in section 10. The 12.8
-decisions were taken on 2026-10-04. Done: N1, N2. Next: N3.
+decisions were taken on 2026-10-04. Done: N1, N2, N3. Next: N4.
 
 ### 12.1 Goal
 
@@ -495,7 +495,7 @@ dev machine (MCP client) ──HTTPS (tailnet)──▶ tailscale serve on VM
 |---|---|
 | Exposure | Server listens on `127.0.0.1` only. `tailscale serve` publishes it as HTTPS on `https://<vm>.<tailnet>.ts.net` (tailnet-only, real certificate). Clients must also send a bearer token. |
 | Repos | Cloned on demand by URL: `start_task` / `ask` accept `repo_url` (+ `base_ref`). The VM keeps one managed clone per repo and fetches before each task. Local installs keep using paths. |
-| Results out | Push branches and open draft PRs (`close_task push_pr`, as built in step 4). The VM holds a GitHub credential limited to the allowlisted repos. |
+| Results out | Push branches and open draft PRs (`close_task push_pr`). Only the server pushes: a fine-grained PAT (Contents and Pull requests read/write, Metadata read, on the allowlisted repos) in the service's `GH_TOKEN`; tasks never get it. PRs target the branch the task started from. |
 | Tokens | One named token per client device, revocable on its own. Only SHA-256 hashes are stored (`http-tokens.json`, 0600). |
 | Identity header | No `Tailscale-User-Login` check. Bearer token plus tailnet ACLs. |
 | Workspaces | `~/claudecode-workspaces`. No automatic pruning; a `prune_workspaces` CLI removes clones with no open tasks when run by hand. |
@@ -622,6 +622,23 @@ First plan:
 - Tests: local bare repos as remotes (allowed by a test-only pattern).
 
 ### 12.6 Step N3: results out (decided: push + draft PRs)
+
+**Done.** Decisions (2026-10-04): server-only push credentials (a task
+cannot push or open PRs itself; soft boundary, since tasks run as the same
+Unix user); a fine-grained PAT; PR base is the task's start branch. As
+built: `repo_url` tasks record `base_branch` (the remote default branch, or
+`base_ref` when it names a remote branch; none for tags and commits) and
+`push_pr` passes `--base`; when the server has `GH_TOKEN` (or
+`GITHUB_TOKEN`), that one push runs with `credential.helper=!gh auth
+git-credential` (only if the gh path is plain), so https pushes use the
+server's token; `GH_TOKEN` is not in the child env allowlist; the push uses
+an explicit `refs/heads/<b>:refs/heads/<b>` refspec; before a `repo_url`
+push, the clone's marker and `origin` are checked again (refused before the
+task is marked `closing`); `GH_TOKEN`, `GITHUB_TOKEN`, and `ghp_`/`gho_`/
+`github_pat_` shapes are redacted. VM setup (token, ruleset on the default
+branch) goes in N4.
+
+First plan:
 
 - If **push + draft PRs**: the VM holds a fine-grained GitHub token (or
   deploy keys) limited to the allowlisted repos; `gh auth login --with-token`

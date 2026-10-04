@@ -21,6 +21,11 @@ const SECRET_ENV_KEYS = new Set([
   "AZURE_CLIENT_SECRET",
   "AZURE_CLIENT_CERTIFICATE_PASSWORD",
   "CLAUDE_CODE_CLIENT_KEY_PASSPHRASE",
+  // GitHub credentials the server uses for push_pr (never given to tasks).
+  "GH_TOKEN",
+  "GITHUB_TOKEN",
+  "GH_ENTERPRISE_TOKEN",
+  "GITHUB_ENTERPRISE_TOKEN",
   // Normally blocked from the child, but operators may explicitly forward
   // them. Their values can contain credentials or signed headers.
   "CLAUDE_CODE_EXTRA_BODY",
@@ -52,6 +57,8 @@ function redactPatternSecrets(text: string): string {
   let out = text;
   out = out.replace(/sk-ant-[A-Za-z0-9_\-]+/g, "sk-ant-***");
   out = out.replace(/\bBearer[ \t]+[A-Za-z0-9._~+\/-]+=*/gi, "Bearer ***");
+  out = out.replace(/\bgithub_pat_[A-Za-z0-9_]{20,}/g, "github_pat_***");
+  out = out.replace(/\bgh[pousr]_[A-Za-z0-9]{30,}/g, "gh*_***");
   out = out.replace(/\bAKIA[A-Z0-9]{16}\b/g, "***"); // AWS access key IDs
   out = out.replace(/\bASIA[A-Z0-9]{16}\b/g, "***"); // AWS temporary (STS) key IDs
   return out;
