@@ -1,7 +1,8 @@
 # claudecode-mcp v2 — design
 
 Status: **approved and built**. 2.0.0 is on `main`, installed from source
-(no npm package; see section 10).
+(no npm package; see section 10). Next: network mode on a dedicated VM, planned in
+section 12 (not built).
 
 ## 1. Goal
 
@@ -464,3 +465,141 @@ Tests: offline tests use a fake `claude` that emits stream-json; live tests
    `ask` keeps project settings, because dropping them also drops the repo's
    CLAUDE.md. Revisit if a model is seen running state-changing Bash in plan
    mode.
+
+## 12. Network mode: a dedicated VM on the tailnet (plan, not built)
+
+Status: **planned 2026-10-04, not built.** To be executed in a new session,
+one PR per step (N1–N5), each with an independent review before merge, as in
+section 10. Start with the open decisions in 12.8.
+
+### 12.1 Goal
+
+Run claudecode-mcp on a dedicated Proxmox VM and call it over the network
+from any machine on the Tailscale tailnet. Keep the local stdio install
+working unchanged on development machines. The VM is the sandbox: tasks run
+there, on repos cloned there, with their own credentials.
+
+```
+dev machine (MCP client) ──HTTPS (tailnet)──▶ tailscale serve on VM
+                                                │ http://127.0.0.1:8787/mcp
+                                                ▼
+                                   claudecode-mcp --http (systemd)
+                                                │ (unchanged from here)
+                                                ▼
+                                     runners ─▶ claude -p ─▶ worktrees
+```
+
+### 12.2 Decisions so far (2026-10-04)
+
+| Topic | Decision |
+|---|---|
+| Exposure | Server listens on `127.0.0.1` only. `tailscale serve` publishes it as HTTPS on `https://<vm>.<tailnet>.ts.net` (tailnet-only, real certificate). Clients must also send a bearer token. |
+| Repos | Cloned on demand by URL: `start_task` / `ask` accept `repo_url` (+ `base_ref`). The VM keeps one managed clone per repo and fetches before each task. Local installs keep using paths. |
+| Results out | **Open** (12.8, decision 1). |
+| Local install | stdio stays the default mode; nothing changes for local use. |
+
+### 12.3 Verified facts
+
+- MCP SDK 1.29 ships `StreamableHTTPServerTransport`
+  (`@modelcontextprotocol/sdk/server/streamableHttp.js`) with
+  `handleRequest(req, res, body)` on plain `node:http`: **no new runtime
+  dependency**. It has DNS-rebinding options (`allowedHosts`,
+  `allowedOrigins`).
+- Claude Code registers remote servers with
+  `claude mcp add --transport http <name> <url> --header "Authorization: Bearer <token>"`.
+- Not yet verified (check in N1/N4): the exact `tailscale serve` syntax on the
+  installed Tailscale version, and that systemd with `KillMode=process`
+  keeps detached runners alive across a service restart (the default
+  `control-group` would kill them, breaking "tasks survive a restart").
+
+### 12.4 Step N1: HTTP transport and auth
+
+- New mode: `claudecode-mcp --http` (stdio stays the default). Config keys:
+  `http.host` (default `127.0.0.1`), `http.port` (default `8787`),
+  `http.path` (default `/mcp`), `http.token_file` (default
+  `~/.config/claudecode-mcp/http-token`, mode 0600, generated on first start
+  if missing; never logged). Refuse to start in HTTP mode without a token.
+- Bearer check with a constant-time compare on every request; 401 otherwise.
+  Set `allowedHosts` to the tailnet name and localhost; reject browser
+  `Origin`s. Request body cap (for example 8 MiB). `GET /healthz` (no auth,
+  no details) for monitoring.
+- Stateless Streamable HTTP (`sessionIdGenerator: undefined`): one
+  `McpServer` + transport per request, sharing **one** `TaskService`, so the
+  recovery and dispatcher background work runs once per process. `ask`
+  progress notifications stream as SSE within the request.
+- Graceful shutdown on SIGTERM: stop accepting, let in-flight requests
+  finish (runners are untouched; they are separate processes).
+- Depth guard and all invariants unchanged. Responses show VM paths.
+- Tests: start the server on a random local port; auth required, wrong
+  token 401, Host check, tools/list and one task end to end over HTTP,
+  progress events for `ask`.
+
+### 12.5 Step N2: repos by URL
+
+- Config: `workspaces_dir` (default `~/claudecode-workspaces`; must be inside
+  `allowed_roots`), `repo_urls`: allowlist patterns such as
+  `["https://github.com/trevoraspencer/*", "git@github.com:trevoraspencer/*"]`.
+  No pattern match, no clone: callers cannot make the VM fetch arbitrary
+  code.
+- `start_task` and `ask` accept `repo_url` instead of `repo` (exactly one of
+  the two). The managed clone lives at
+  `<workspaces_dir>/<host>/<owner>/<repo>`; first use clones, later uses
+  `git fetch --prune` under a per-repo lock. `base_ref` defaults to the
+  remote's default branch (`origin/HEAD`), not the clone's checkout. Then
+  the worktree flow from step 4 applies unchanged.
+- URL handling: parse and normalize; refuse `ext::`, `file://` outside
+  tests, credentials embedded in URLs, and option-like values.
+- `list_tasks` shows `repo_url` for such tasks. A `prune_workspaces` helper
+  (CLI, not MCP) can remove clones with no open tasks.
+- Tests: local bare repos as remotes (allowed by a test-only pattern).
+
+### 12.6 Step N3: results out (after decision 1)
+
+- If **push + draft PRs**: the VM holds a fine-grained GitHub token (or
+  deploy keys) limited to the allowlisted repos; `gh auth login --with-token`
+  on the VM; `close_task push_pr` works as built in step 4. Optionally
+  restrict pushes to `claude/*` branches with a GitHub ruleset.
+- If **branches only**: same credential, no `gh`; `push_pr` pushes and says
+  so (already supported when `gh` is missing).
+- If **no push**: results only via `get_diff`; disable `push_pr` in network
+  mode with a clear error. Document how to apply a diff locally.
+
+### 12.7 Steps N4–N5: VM deployment and client setup docs
+
+- **N4 `docs/DEPLOY-proxmox.md`** plus `examples/claudecode-mcp.service`:
+  VM size (2–4 vCPU, 8 GB RAM, 40 GB disk; Debian 13 or Ubuntu 24.04 LTS),
+  a dedicated `claude` user, Node 22, `claude` CLI install, login with
+  `claude setup-token` (long-lived `CLAUDE_CODE_OAUTH_TOKEN` in a 0600
+  systemd `EnvironmentFile`) or `claude auth login` over SSH, git and `gh`
+  credentials per decision 1, Tailscale install, `tailscale serve` command,
+  systemd unit (`KillMode=process`, `Restart=on-failure`, `User=claude`),
+  no public ports (host firewall), tailnet ACL limiting which devices may
+  reach the VM, logs via `journalctl`, upgrades (`git pull && npm ci &&
+  npm run build && systemctl restart`), and what to back up (config, token,
+  state dir).
+- **N5 client setup in the README:** register the VM on each dev machine
+  (`claude mcp add --transport http claudecode-vm https://<vm>.<tailnet>.ts.net/mcp --header "Authorization: Bearer $(cat token)"`),
+  keep a local stdio install side by side under another name
+  (`claudecode-local`), and when to use which (VM: long or risky work,
+  parallel tasks; local: quick reviews of local, uncommitted work).
+
+### 12.8 Open decisions for the new session (ask first)
+
+1. **Results out:** push branches + draft PRs (recommended: easiest review
+   on GitHub), push branches only, or no push (diff text only).
+2. **Token:** one shared token, or one token per client device (named, so
+   one can be revoked)? Recommended: per-device tokens in a small JSON file.
+3. **Extra identity check:** also require `tailscale serve`'s
+   `Tailscale-User-Login` header to be on an allowlist? Recommended: optional
+   config, off by default.
+4. **Workspaces location and disk budget** on the VM (default
+   `~/claudecode-workspaces`), and whether to prune old clones automatically.
+
+### 12.9 Risks
+
+- Anyone who can reach the endpoint with a token can run code on the VM
+  through Claude in `auto` mode. Keep the VM single-purpose, keep tokens
+  per device, and use tailnet ACLs.
+- The subscription login lives on the VM; treat the VM disk as sensitive.
+- Paths in responses are VM paths; callers must use `get_diff` or git to see
+  results, not local file reads.
