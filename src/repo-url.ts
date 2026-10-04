@@ -3,7 +3,8 @@
  * normalization, and allowlist matching. Pure functions, no I/O.
  *
  * Accepted forms: `https://host/a/b[.git]`, `ssh://[user@]host[:port]/a/b`,
- * and scp-like `user@host:a/b`. All normalize to one canonical string, so a
+ * and scp-like `user@host:a/b`. Each normalizes to one canonical string (the
+ * three forms stay distinct: scp paths are home-relative in git), so a
  * pattern and a URL compare the same way. Everything else is refused:
  * other schemes (`ext::`, `http://`, `git://`; `file://` only when the
  * caller allows it, for tests), credentials, query or fragment, percent
@@ -19,11 +20,11 @@ export class RepoUrlError extends Error {
 }
 
 export interface RepoUrl {
-  scheme: "https" | "ssh" | "file";
+  scheme: "https" | "ssh" | "scp" | "file";
   user?: string;
   host: string;
   port?: string;
-  /** Path segments, without a trailing `.git` on the last one (kept for file://). */
+  /** Path segments, without a trailing `.git` on the last one. */
   segments: string[];
   /** The normalized form used for matching and display (no `.git`). */
   canonical: string;
@@ -70,7 +71,7 @@ export function parseRepoUrl(
 
   const scp = raw.includes("://") ? null : SCP_RE.exec(raw);
   if (scp) {
-    scheme = "ssh";
+    scheme = "scp";
     user = scp[1];
     host = scp[2]!.toLowerCase();
     path = scp[3]!;
@@ -111,7 +112,7 @@ export function parseRepoUrl(
     .split("/")
     .filter((s, i, all) => !(s === "" && (i === 0 || i === all.length - 1)));
   let gitSuffix = false;
-  if (parts.length > 0 && scheme !== "file") {
+  if (parts.length > 0) {
     const last = parts[parts.length - 1]!;
     if (last.endsWith(".git") && last.length > 4) {
       parts[parts.length - 1] = last.slice(0, -4);
@@ -124,9 +125,13 @@ export function parseRepoUrl(
   if (parts.length < minSegs || parts.length > maxSegs) {
     bad(raw, scheme === "file" ? "bad path" : "path must be owner/repo (2 to 4 segments)");
   }
-  for (const s of parts) {
+  for (const [i, s] of parts.entries()) {
     if (!segRe.test(s) || s === "." || s === ".." || s.startsWith("-")) {
       bad(raw, `bad path segment "${s.slice(0, 40)}"`);
+    }
+    // Clone folders end in .git, so no other folder on the path may.
+    if (i < parts.length - 1 && s.endsWith(".git")) {
+      bad(raw, `path segment "${s.slice(0, 40)}" may not end in .git`);
     }
   }
 
@@ -135,7 +140,9 @@ export function parseRepoUrl(
   const canonical =
     scheme === "file"
       ? `file:///${parts.join("/")}`
-      : `${scheme}://${auth}${hostPort}/${parts.join("/")}`;
+      : scheme === "scp"
+        ? `${auth}${host}:${parts.join("/")}`
+        : `${scheme}://${auth}${hostPort}/${parts.join("/")}`;
   return {
     scheme,
     ...(user ? { user } : {}),
@@ -172,8 +179,18 @@ export function urlAllowed(url: RepoUrl, patterns: readonly RepoUrl[]): boolean 
   );
 }
 
-/** Folder names for the managed clone, relative to `workspaces_dir`. */
+/**
+ * Folder names for the managed clone, relative to `workspaces_dir`:
+ * `<scheme>_[<user>@]<host>[_<port>]/<owner>/<repo>.git`. The scheme and user
+ * keep https, ssh, and scp clones of one repo apart (each was allowed on its
+ * own), and the `.git` leaf (no other segment may end in `.git`) keeps one
+ * clone from ever sitting inside another.
+ */
 export function cloneSegments(url: RepoUrl): string[] {
-  if (url.scheme === "file") return ["file", ...url.segments];
-  return [url.port ? `${url.host}_${url.port}` : url.host, ...url.segments];
+  const first =
+    url.scheme === "file"
+      ? "file"
+      : `${url.scheme}_${url.user ? url.user + "@" : ""}${url.host}${url.port ? "_" + url.port : ""}`;
+  const dirs = url.segments.slice(0, -1);
+  return [first, ...dirs, `${url.segments[url.segments.length - 1]}.git`];
 }

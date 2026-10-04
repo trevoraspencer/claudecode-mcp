@@ -37,7 +37,6 @@ import {
   waitForLaunch,
   withDispatchLock,
   withLaunchLock,
-  withRepoLock,
   type SpecInput,
 } from "./launcher.js";
 import { errorLog, warnLog } from "./log.js";
@@ -749,11 +748,10 @@ export class TaskService {
         }
       }
       if (action === "delete" && !force && wt.repo_url) {
-        // A managed clone's own HEAD is never updated; what matters is
-        // whether the work is on the remote.
-        const ahead = (
-          await git(["rev-list", "--count", branch, "--not", "--remotes"], root)
-        ).trim();
+        // A managed clone has no local default branch; what matters is
+        // whether the task's own commits (after its base) are on the remote.
+        const notOn = wt.base_commit ? [wt.base_commit, "--remotes"] : ["--remotes"];
+        const ahead = (await git(["rev-list", "--count", branch, "--not", ...notOn], root)).trim();
         if (ahead !== "0") {
           throw new ToolError(
             `branch ${branch} has ${ahead} commit(s) not on any remote branch; ` +
@@ -1106,8 +1104,8 @@ export class TaskService {
       }
       if (askWorktree && stopped) {
         const { clone, path } = askWorktree;
-        await withRepoLock(clone, this.env, () => removeAskWorktree(clone, path)).catch(
-          (err: Error) => errorLog({ phase: "ask_cleanup", dir: path, error: err.message }),
+        await removeAskWorktree(this.config, clone, path).catch((err: Error) =>
+          errorLog({ phase: "ask_cleanup", dir: path, error: err.message }),
         );
       }
     }

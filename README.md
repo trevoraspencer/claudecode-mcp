@@ -132,7 +132,8 @@ with an allowlist in the config:
 
 `start_task` and `ask` then accept `repo_url` (exactly one of `repo` or
 `repo_url`). The server keeps one clone per repo at
-`<workspaces_dir>/<host>/<owner>/<repo>` and fetches it before each task.
+`<workspaces_dir>/<scheme>_<host>/<owner>/<repo>.git` and fetches it before
+each task.
 `base_ref` defaults to the remote's default branch; a branch name means the
 remote branch. `repo_url` tasks always get a worktree. Accepted URL forms:
 `https://host/owner/repo`, `ssh://user@host/owner/repo`, and
@@ -140,8 +141,8 @@ remote branch. `repo_url` tasks always get a worktree. Accepted URL forms:
 Results come back through `get_diff` and `close_task` with `push_pr`.
 
 `claudecode-mcp prune-workspaces [--dry-run] [--force]` removes clones that
-no open task uses. It keeps a clone with unpushed local commits unless
-`--force`.
+no open task uses. It only touches clones it made, and keeps a clone with
+unpushed local commits, a stash, or loose files unless `--force`.
 
 ## Configuration
 

@@ -157,20 +157,20 @@ export function withDispatchLock<T>(env: NodeJS.ProcessEnv, fn: () => Promise<T>
 const REPO_LOCK_WAIT_MS = 15 * 60_000;
 
 /**
- * Run `fn` while holding the lock for one managed clone (`locks/repo-<hash>.lock`
- * in the state dir), so clone, fetch, and worktree creation for one repo never
- * run at once, in any server process.
+ * Run `fn` while holding the lock for one managed clone, so clone, fetch,
+ * worktree creation, and prune for one repo never run at once, in any server
+ * process. Locks live in `<workspaces_dir>/.locks`, keyed by the lowercased
+ * path (case-insensitive file systems map two spellings to one folder).
  */
 export function withRepoLock<T>(
+  lockDir: string,
   cloneDir: string,
-  env: NodeJS.ProcessEnv,
   fn: () => Promise<T>,
 ): Promise<T> {
-  const dir = join(stateDir(env), "locks");
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const key = createHash("sha256").update(cloneDir).digest("hex").slice(0, 32);
+  mkdirSync(lockDir, { recursive: true, mode: 0o700 });
+  const key = createHash("sha256").update(cloneDir.toLowerCase()).digest("hex").slice(0, 32);
   return withFileLock(
-    join(dir, `repo-${key}.lock`),
+    join(lockDir, `repo-${key}.lock`),
     `repo is busy: ${cloneDir}`,
     fn,
     REPO_LOCK_WAIT_MS,

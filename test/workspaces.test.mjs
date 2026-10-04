@@ -39,7 +39,17 @@ function remoteBox(extraConfig = {}, envExtra = {}) {
     CLAUDECODE_MCP_GH_BIN: "/nonexistent/gh",
     ...envExtra,
   });
-  return { ...b, remotes, bare, url: `file://${bare}`, src: probe.repo, ws, probeDir: probe.dir };
+  return {
+    ...b,
+    remotes,
+    bare,
+    url: `file://${bare}`,
+    canonical: `file://${bare.replace(/\.git$/, "")}`,
+    clone: join(ws, "file", ...bare.split("/").filter(Boolean)),
+    src: probe.repo,
+    ws,
+    probeDir: probe.dir,
+  };
 }
 
 async function server(t, b) {
@@ -83,9 +93,11 @@ test("start_task with repo_url clones, branches from origin/HEAD, and records th
   const start = await s.call("start_task", { prompt: "hello", repo_url: b.url });
   assert.equal(start.isError, false, start.text);
   const v = start.json;
-  const clone = join(b.ws, "file", ...b.bare.split("/").filter(Boolean));
+  const clone = b.clone;
   assert.ok(existsSync(join(clone, ".git")), "managed clone exists");
-  assert.equal(v.workspace.repo_url, `file://${b.bare}`);
+  assert.equal(v.workspace.repo_url, b.canonical);
+  assert.equal(git(clone, "config", "--get", "claudecode-mcp.managed"), b.canonical);
+  assert.equal(git(clone, "branch", "--list", "main"), "", "no stale local default branch");
   assert.equal(v.workspace.base_commit, git(b.src, "rev-parse", "main"));
   assert.ok(v.workdir.startsWith(join(realpathSync(clone), ".claude", "worktrees")), v.workdir);
   const done = await waitIdle(s, v.task_id);
@@ -94,7 +106,7 @@ test("start_task with repo_url clones, branches from origin/HEAD, and records th
   const listed = await s.call("list_tasks", { repo_url: b.url });
   assert.deepEqual(
     listed.json.map((x) => [x.task_id, x.repo_url]),
-    [[v.task_id, `file://${b.bare}`]],
+    [[v.task_id, b.canonical]],
   );
   assert.deepEqual((await s.call("list_tasks", { repo_url: "file:///nope/x" })).json, []);
 
@@ -173,7 +185,7 @@ test("ask with repo_url runs in a temporary checkout that is removed", async (t)
   const r = await s.call("ask", { prompt: "hi", repo_url: b.url }, { timeoutMs: 60_000 });
   assert.equal(r.isError, false, r.text);
   assert.equal(r.text, "echo: hi");
-  const clone = join(b.ws, "file", ...b.bare.split("/").filter(Boolean));
+  const clone = b.clone;
   const wts = git(clone, "worktree", "list", "--porcelain")
     .split("\n")
     .filter((l) => l.startsWith("worktree "));
@@ -246,12 +258,63 @@ test("repo_url over HTTP mode", async (t) => {
   t.after(() => srv.stop());
   const start = await srv.call("start_task", { prompt: "hello", repo_url: b.url });
   assert.equal(start.isError, false, start.text);
-  for (let i = 0; i < 40; i++) {
+  let settled;
+  for (let i = 0; i < 40 && !settled; i++) {
     const w = await srv.call("wait_task", { task_id: start.json.task_id, timeout_s: 5 });
-    if (!w.json.wait_timed_out) {
-      assert.equal(w.json.result.text, "echo: hello");
-      break;
-    }
+    if (!w.json.wait_timed_out) settled = w.json;
   }
+  assert.ok(settled, "task settled");
+  assert.equal(settled.result.text, "echo: hello");
   await srv.call("cancel_task", { task_id: start.json.task_id }, { timeoutMs: 30_000 });
+});
+
+test("prune leaves repos it did not make alone, even with no tasks", async (t) => {
+  const b = box();
+  const s = await server(t, b);
+  // A hand-made repo where a clone would go, and one elsewhere under ws.
+  const foreign = join(b.ws, "https_h.example", "o", "r.git");
+  mkdirSync(foreign, { recursive: true });
+  execFileSync("git", ["init", "-q", foreign]);
+  const other = join(b.ws, "myproj");
+  mkdirSync(other);
+  execFileSync("git", ["init", "-q", other]);
+  const p = spawnSync(process.execPath, [CLI, "prune-workspaces", "--force"], {
+    env: b.env,
+    encoding: "utf8",
+    timeout: 30_000,
+  });
+  assert.equal(p.status, 0, p.stderr);
+  assert.match(p.stdout, /^kept\t.*r\.git\tnot made by claudecode-mcp/m);
+  assert.ok(existsSync(foreign) && existsSync(other));
+  await s.call("list_tasks", {});
+});
+
+test("a managed clone whose origin was changed is refused, not followed", async (t) => {
+  const b = box();
+  const s = await server(t, b);
+  const first = await s.call("start_task", { prompt: "x", repo_url: b.url });
+  assert.equal(first.isError, false, first.text);
+  const elsewhere = join(b.remotes, "evil.git");
+  execFileSync("git", ["init", "-q", "--bare", elsewhere]);
+  git(b.clone, "remote", "set-url", "origin", `file://${elsewhere}`);
+  const again = await s.call("start_task", { prompt: "x", repo_url: b.url });
+  assert.equal(again.isError, true);
+  assert.match(again.text, /no longer points at/);
+});
+
+test("close delete counts only the task's own commits, even after the base branch is gone", async (t) => {
+  const b = box();
+  const s = await server(t, b);
+  execFileSync("git", ["commit", "-q", "--allow-empty", "-m", "f1"], { cwd: b.src });
+  git(b.src, "push", "-q", "origin", "HEAD:feature");
+  git(b.src, "reset", "-q", "--hard", "HEAD~1");
+  const start = await s.call("start_task", { prompt: "x", repo_url: b.url, base_ref: "feature" });
+  assert.equal(start.isError, false, start.text);
+  await waitIdle(s, start.json.task_id);
+  // The feature branch is merged and deleted upstream; a later fetch prunes it.
+  git(b.src, "push", "-q", "origin", "--delete", "feature");
+  const other = await s.call("start_task", { prompt: "y", repo_url: b.url });
+  assert.equal(other.isError, false, other.text);
+  const del = await s.call("close_task", { task_id: start.json.task_id, action: "delete" });
+  assert.equal(del.isError, false, del.text);
 });

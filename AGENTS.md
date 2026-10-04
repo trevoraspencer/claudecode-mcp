@@ -173,8 +173,13 @@ Tests live in `test/` and import compiled modules from `dist/`.
   `CLAUDECODE_MCP_ALLOW_FILE_URLS=1`. Clone and fetch run with
   `GIT_ALLOW_PROTOCOL`, `--no-recurse-submodules`, and `--` before the URL.
 - Managed clones live under `workspaces_dir`, which must be inside
-  `allowed_roots`. Clone, fetch, and worktree creation for one repo run
-  under `withRepoLock`. `repo_url` tasks never run `in_place`.
+  `allowed_roots`, at `<scheme>_<host>/<owner>/<repo>.git` (`cloneSegments`;
+  clones never nest). Clone, fetch, worktree creation, and prune for one
+  repo run under `withRepoLock` (`<workspaces_dir>/.locks`). `repo_url`
+  tasks never run `in_place`. Before a fetch, the clone's
+  `claudecode-mcp.managed` marker and `origin` URL must match the request.
+  `prune-workspaces` never touches a folder without the marker and never
+  drops worktrees or (without `--force`) unpushed commits.
 - `ask` is read-only unless `writable: true` (plan mode plus blocked file
   tools). Without `repo` it runs in a fresh temp folder that is removed
   afterwards.

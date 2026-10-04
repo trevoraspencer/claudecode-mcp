@@ -586,6 +586,22 @@ startup when `repo_urls` is set. Code: `src/repo-url.ts`,
 `src/workspaces.ts`; tests: `test/repo_url.test.mjs`,
 `test/workspaces.test.mjs`.
 
+The review before merge changed: clone layout is
+`<workspaces_dir>/<scheme>_[<user>@]<host>[_<port>]/<owner>/<repo>.git` (https,
+ssh, and scp clones of one repo stay apart; only the leaf ends in `.git`, so
+clones never nest); scp-like URLs keep their form (home-relative in git) and
+are a separate scheme for matching; each clone is marked
+(`claudecode-mcp.managed` in its config), its HEAD detached and its local
+default branch deleted (every local branch is task work); before each fetch
+the marker and `origin` URL must still match the request (refused
+otherwise; tasks run as the same user and could change them); locks live in
+`<workspaces_dir>/.locks`; `close_task delete` counts only commits after the
+task's base that are on no remote branch; `prune-workspaces` touches only
+marked clones, runs `git worktree prune` first, keeps clones with worktrees
+and, without `--force`, ones with unpushed commits, a stash, or loose files,
+renames a clone aside under the lock and deletes it after, and clears temp
+clones left by a crash.
+
 First plan:
 
 - Config: `workspaces_dir` (default `~/claudecode-workspaces`; must be inside

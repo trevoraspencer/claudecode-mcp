@@ -1,11 +1,18 @@
 /**
  * Managed clones for `repo_url` tasks (DESIGN-v2 section 12.5).
  *
- * One clone per repo at `<workspaces_dir>/<host>/<owner>/<repo>`, made with
- * `git clone --no-checkout` on first use and refreshed with `git fetch
- * --prune` before each task. Callers hold `withRepoLock` around the clone or
- * fetch and the worktree that follows, so one repo is never fetched twice at
- * once. Task worktrees then use the normal step-4 flow inside the clone.
+ * One clone per repo at `<workspaces_dir>/<scheme>_<host>/<owner>/<repo>.git`
+ * (see `cloneSegments`), made with `git clone --no-checkout` on first use and
+ * refreshed with `git fetch --prune` before each task. A clone is marked as
+ * ours (`claudecode-mcp.managed` in its config), its HEAD is detached, and its
+ * local default branch is deleted, so every local branch is task work. The
+ * repo lock (`withRepoLock`, in `<workspaces_dir>/.locks`) is held around the
+ * clone or fetch and the worktree that follows, and around prune.
+ *
+ * Trust note: tasks run as the same user and can change a clone's config.
+ * The `repo_urls` allowlist decides what callers may ask for; before each
+ * fetch the clone's marker and `origin` URL are checked against the request,
+ * so an accidental or task-made change is refused rather than followed.
  */
 
 import { randomBytes } from "node:crypto";
@@ -17,19 +24,28 @@ import {
   realpathSync,
   renameSync,
   rmSync,
+  statSync,
 } from "node:fs";
+import { rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { Config } from "./config.js";
 import { assertRef, ensureWorktreeExclude, git, GitError, run } from "./git.js";
 import { withRepoLock } from "./launcher.js";
+import { errorLog } from "./log.js";
 import { tasksDir } from "./paths.js";
 import { isInside } from "./repo.js";
 import { cloneSegments, parseRepoUrl, urlAllowed, type RepoUrl } from "./repo-url.js";
 import { readTask, TASK_ID_RE } from "./task-store.js";
 
 export const ALLOW_FILE_URLS_ENV = "CLAUDECODE_MCP_ALLOW_FILE_URLS";
+export const MANAGED_KEY = "claudecode-mcp.managed";
 const CLONE_TIMEOUT_MS = 10 * 60_000;
 const FETCH_TIMEOUT_MS = 5 * 60_000;
+const TEMP_CLONE_PREFIX = ".clone-";
+const TRASH_PREFIX = ".trash-";
+const LOCKS_DIR = ".locks";
+/** A temp clone older than this is left over from a crash. */
+const TEMP_CLONE_STALE_MS = 2 * CLONE_TIMEOUT_MS;
 
 export class WorkspaceError extends Error {
   readonly code = "EWORKSPACE" as const;
@@ -88,9 +104,28 @@ export function clonePathFor(url: RepoUrl, workspacesReal: string): string {
   return join(workspacesReal, ...cloneSegments(url));
 }
 
+function lockRepo<T>(ws: string, clone: string, fn: () => Promise<T>): Promise<T> {
+  return withRepoLock(join(ws, LOCKS_DIR), clone, fn);
+}
+
+async function configGet(clone: string, key: string): Promise<string | undefined> {
+  const r = await run("git", ["config", "--local", "--get", key], clone);
+  return r.code === 0 ? r.stdout.trim() : undefined;
+}
+
+/** True if `dir` is a clone this server made (top level with our marker). */
+async function isManagedClone(dir: string): Promise<boolean> {
+  const top = await run("git", ["rev-parse", "--show-toplevel"], dir);
+  if (top.code !== 0 || realpathSync.native(top.stdout.trim()) !== realpathSync.native(dir)) {
+    return false;
+  }
+  return (await configGet(dir, MANAGED_KEY)) !== undefined;
+}
+
 /**
- * Clone or fetch. Call only under `withRepoLock(clone)`. A new clone is made
- * in a temp folder and renamed into place, so a failed clone leaves nothing.
+ * Clone or fetch. Call only under the repo lock. A new clone is made in a
+ * temp folder, marked, detached from its default branch, and then renamed
+ * into place, so a failed clone leaves nothing.
  */
 export async function syncClone(
   url: RepoUrl,
@@ -108,9 +143,22 @@ export async function syncClone(
     if (lstatSync(clone).isSymbolicLink()) {
       throw new WorkspaceError(`clone folder is a symlink: ${clone}`);
     }
-    const top = await run("git", ["rev-parse", "--show-toplevel"], clone);
-    if (top.code !== 0 || realpathSync.native(top.stdout.trim()) !== realpathSync.native(clone)) {
+    if (!(await isManagedClone(clone))) {
       throw new WorkspaceError(`${clone} exists but is not a managed clone; remove it`);
+    }
+    const marker = await configGet(clone, MANAGED_KEY);
+    const origin = await configGet(clone, "remote.origin.url");
+    let originCanonical: string | undefined;
+    try {
+      originCanonical = origin ? parseRepoUrl(origin, { allowFile: true }).canonical : undefined;
+    } catch {
+      originCanonical = undefined;
+    }
+    if (marker !== url.canonical || originCanonical !== url.canonical) {
+      throw new WorkspaceError(
+        `managed clone ${clone} no longer points at ${url.canonical} ` +
+          `(origin: ${(origin ?? "none").slice(0, 200)}); fix remote.origin.url or remove the clone`,
+      );
     }
     await git(["fetch", "--prune", "--no-recurse-submodules", "origin"], clone, {
       env: remoteEnv(env),
@@ -123,13 +171,24 @@ export async function syncClone(
     }).catch(() => {});
     return "fetched";
   }
-  const tmp = join(parent, `.clone-${randomBytes(6).toString("hex")}`);
+  const tmp = join(parent, `${TEMP_CLONE_PREFIX}${randomBytes(6).toString("hex")}`);
   try {
     await git(
       ["clone", "--no-checkout", "--no-recurse-submodules", "--", url.cloneUrl, tmp],
       parent,
       { env: remoteEnv(env), timeoutMs: CLONE_TIMEOUT_MS },
     );
+    await git(["config", "--local", MANAGED_KEY, url.canonical], tmp);
+    // Detach HEAD and drop the local default branch: it would never be
+    // updated, and every remaining local branch is then task work.
+    const branch = await run("git", ["symbolic-ref", "-q", "--short", "HEAD"], tmp);
+    const head = await run("git", ["rev-parse", "--verify", "-q", "HEAD"], tmp);
+    if (head.code === 0) {
+      await git(["update-ref", "--no-deref", "HEAD", head.stdout.trim()], tmp);
+      if (branch.code === 0 && branch.stdout.trim()) {
+        await git(["branch", "-D", "--", branch.stdout.trim()], tmp);
+      }
+    }
     renameSync(tmp, clone);
   } catch (err) {
     rmSync(tmp, { recursive: true, force: true });
@@ -140,9 +199,8 @@ export async function syncClone(
 
 /**
  * The commit to start from. Default: the remote's default branch
- * (`origin/HEAD`). A branch name means the remote branch (`origin/<name>`),
- * since the clone's own branches are never updated; tags and commits work
- * as given.
+ * (`origin/HEAD`). A branch name means the remote branch (`origin/<name>`);
+ * tags and commits work as given.
  */
 export async function resolveRemoteBase(clone: string, baseRef?: string): Promise<string> {
   const tryRef = async (ref: string) => {
@@ -155,8 +213,9 @@ export async function resolveRemoteBase(clone: string, baseRef?: string): Promis
   };
   if (baseRef === undefined) {
     const head = await tryRef("refs/remotes/origin/HEAD");
-    if (!head)
+    if (!head) {
       throw new WorkspaceError("the remote has no default branch (origin/HEAD); pass base_ref");
+    }
     return head;
   }
   assertRef(baseRef);
@@ -176,7 +235,7 @@ export async function withManagedClone<T>(
 ): Promise<T> {
   const ws = ensureWorkspacesDir(config);
   const clone = clonePathFor(url, ws);
-  return withRepoLock(clone, env, async () => {
+  return lockRepo(ws, clone, async () => {
     await syncClone(url, clone, ws, env);
     return fn(clone);
   });
@@ -201,10 +260,14 @@ export async function addAskWorktree(clone: string, base: string): Promise<strin
   return path;
 }
 
-export async function removeAskWorktree(clone: string, path: string): Promise<void> {
-  await run("git", ["worktree", "remove", "--force", path], clone);
-  await run("git", ["worktree", "prune"], clone);
-  rmSync(path, { recursive: true, force: true });
+/** Remove an `ask` worktree under the repo lock. */
+export async function removeAskWorktree(config: Config, clone: string, path: string) {
+  const ws = ensureWorkspacesDir(config);
+  await lockRepo(ws, clone, async () => {
+    await run("git", ["worktree", "remove", "--force", path], clone);
+    await run("git", ["worktree", "prune"], clone);
+    rmSync(path, { recursive: true, force: true });
+  });
 }
 
 // ── prune ─────────────────────────────────────────────────────────────
@@ -214,19 +277,39 @@ export interface PruneResult {
   kept: { clone: string; reason: string }[];
 }
 
-/** Managed clones under workspaces_dir: folders that are a git top level. */
-function findClones(ws: string, depth = 0): string[] {
-  if (depth > 6) return [];
+/**
+ * Candidate clones under workspaces_dir: folders named `*.git` that hold a
+ * `.git` (the layout `cloneSegments` makes). Also clears temp clones left by
+ * a crash. Never follows symlinks.
+ */
+function findClones(dir: string, depth: number, out: string[], dryRun: boolean): void {
+  if (depth > 6) return;
   let entries;
   try {
-    entries = readdirSync(ws, { withFileTypes: true });
+    entries = readdirSync(dir, { withFileTypes: true });
   } catch {
-    return [];
+    return;
   }
-  if (entries.some((e) => e.name === ".git")) return [ws];
-  return entries
-    .filter((e) => e.isDirectory() && !e.isSymbolicLink() && !e.name.startsWith("."))
-    .flatMap((e) => findClones(join(ws, e.name), depth + 1));
+  for (const e of entries) {
+    if (!e.isDirectory() || e.isSymbolicLink()) continue;
+    const path = join(dir, e.name);
+    if (e.name.startsWith(TEMP_CLONE_PREFIX)) {
+      try {
+        if (!dryRun && Date.now() - statSync(path).mtimeMs > TEMP_CLONE_STALE_MS) {
+          rmSync(path, { recursive: true, force: true });
+        }
+      } catch {
+        // gone
+      }
+      continue;
+    }
+    if (e.name === LOCKS_DIR || e.name.startsWith(TRASH_PREFIX)) continue;
+    if (e.name.endsWith(".git") && existsSync(join(path, ".git"))) {
+      out.push(path);
+      continue;
+    }
+    findClones(path, depth + 1, out, dryRun);
+  }
 }
 
 /** Clones that tasks still use (any task not closed whose repo_root is the clone). */
@@ -252,10 +335,43 @@ function clonesInUse(env: NodeJS.ProcessEnv): Map<string, string[]> {
   return out;
 }
 
+/** Why a managed clone must be kept, or undefined if it can go. */
+async function keepReason(clone: string, force: boolean): Promise<string | undefined> {
+  // Forget worktrees whose folders are gone, then count the rest.
+  await run("git", ["worktree", "prune"], clone);
+  const wts = await run("git", ["worktree", "list", "--porcelain"], clone);
+  if (wts.code !== 0) return "git worktree list failed";
+  const others = wts.stdout.split("\n").filter((l) => l.startsWith("worktree ")).length - 1;
+  if (others > 0) return `${others} worktree(s) still exist`;
+  if (force) return undefined;
+  const unpushed = await run(
+    "git",
+    ["rev-list", "--count", "--branches", "--not", "--remotes"],
+    clone,
+  );
+  const count = unpushed.code === 0 ? Number(unpushed.stdout.trim()) : NaN;
+  if (Number.isNaN(count)) return "could not check for unpushed commits (use --force)";
+  if (count > 0) return `${count} local commit(s) not on any remote branch (use --force)`;
+  const stash = await run("git", ["rev-parse", "--verify", "-q", "refs/stash"], clone);
+  if (stash.code === 0) return "has a git stash (use --force)";
+  // The clone has no checkout; files in its folder were put there by hand.
+  const untracked = await run(
+    "git",
+    ["ls-files", "--others", "--exclude-standard", "--directory", "-z", "--", ":!.claude"],
+    clone,
+  );
+  if (untracked.code !== 0 || untracked.stdout.length > 0) {
+    return "has files in its folder (use --force)";
+  }
+  return undefined;
+}
+
 /**
- * Remove managed clones that no open task uses. Keeps a clone that still has
- * worktrees, or local commits that are on no remote branch (unpushed work
- * from `keep_branch`), unless `force`.
+ * Remove managed clones that no open task uses. Only folders this server made
+ * (marker in their config) are touched. Keeps a clone that still has
+ * worktrees; without `force` also one with local commits on no remote
+ * branch, a stash, or loose files. Removal renames the clone aside under the
+ * lock, then deletes it after the lock is released.
  */
 export async function pruneWorkspaces(
   config: Config,
@@ -265,42 +381,41 @@ export async function pruneWorkspaces(
   const result: PruneResult = { removed: [], kept: [] };
   if (!existsSync(config.workspaces_dir)) return result;
   const ws = ensureWorkspacesDir(config);
+  if (!opts.dryRun) {
+    for (const e of readdirSync(ws)) {
+      if (e.startsWith(TRASH_PREFIX)) await rm(join(ws, e), { recursive: true, force: true });
+    }
+  }
   const inUse = clonesInUse(env);
-  for (const clone of findClones(ws)) {
-    await withRepoLock(clone, env, async () => {
+  const candidates: string[] = [];
+  findClones(ws, 0, candidates, opts.dryRun === true);
+  for (const clone of candidates) {
+    const trash = await lockRepo(ws, clone, async () => {
+      if (!(await isManagedClone(clone))) {
+        result.kept.push({ clone, reason: "not made by claudecode-mcp; left alone" });
+        return undefined;
+      }
       const users = inUse.get(clone);
       if (users) {
         result.kept.push({ clone, reason: `used by open task(s) ${users.join(", ")}` });
-        return;
+        return undefined;
       }
-      const wts = await run("git", ["worktree", "list", "--porcelain"], clone);
-      const others = wts.stdout.split("\n").filter((l) => l.startsWith("worktree ")).length - 1;
-      if (wts.code !== 0) {
-        result.kept.push({ clone, reason: "git worktree list failed" });
-        return;
+      const reason = await keepReason(clone, opts.force === true);
+      if (reason) {
+        result.kept.push({ clone, reason });
+        return undefined;
       }
-      if (others > 0) {
-        result.kept.push({ clone, reason: `${others} worktree(s) still exist` });
-        return;
-      }
-      const unpushed = await run(
-        "git",
-        ["rev-list", "--count", "--branches", "--not", "--remotes"],
-        clone,
-      );
-      const count = unpushed.code === 0 ? Number(unpushed.stdout.trim()) : NaN;
-      if (!opts.force && !(count === 0)) {
-        result.kept.push({
-          clone,
-          reason: Number.isNaN(count)
-            ? "could not check for unpushed commits (use --force)"
-            : `${count} local commit(s) not on any remote branch (use --force)`,
-        });
-        return;
-      }
-      if (!opts.dryRun) rmSync(clone, { recursive: true, force: true });
       result.removed.push(clone);
+      if (opts.dryRun) return undefined;
+      const aside = join(ws, `${TRASH_PREFIX}${randomBytes(6).toString("hex")}`);
+      renameSync(clone, aside);
+      return aside;
     });
+    if (trash) {
+      await rm(trash, { recursive: true, force: true }).catch((err: Error) =>
+        errorLog({ phase: "prune", dir: trash, error: err.message }),
+      );
+    }
   }
   return result;
 }
