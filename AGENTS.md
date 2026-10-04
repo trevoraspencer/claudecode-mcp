@@ -193,12 +193,17 @@ Tests live in `test/` and import compiled modules from `dist/`.
   Every request except `GET /healthz` passes the Host check, the Origin
   check, and a bearer token, in that order, before anything else is read.
   Tokens are stored only as SHA-256 hashes in a private (0600, own user,
-  not a symlink) file, compared in constant time, and never logged. An
-  unsafe or broken tokens file accepts no token (fail closed). Request
-  bodies are capped (`MAX_BODY_BYTES`).
+  not a symlink, read through one `O_NOFOLLOW` descriptor) file whose folder
+  only its owner or root can change. They are compared in constant time and
+  never logged. The server re-reads the file on every request; an unsafe,
+  missing, or broken file accepts no token (fail closed). `token add` and
+  `token revoke` hold `<file>.lock`. Error answers close the connection.
+  Request bodies are capped (`MAX_BODY_BYTES`).
 - HTTP mode creates one `TaskService` per process (`createTaskService`) and
   one `McpServer` per request. Never start recovery or the dispatcher per
-  request. `--http` refuses to start at depth >= 1.
+  request. `--http` and the `token` commands refuse to run at depth >= 1 (a task
+  could otherwise mint a token and reach a depth-0 server over loopback).
+  Background work starts only after the port is bound.
 
 ## Testing guidance
 

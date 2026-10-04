@@ -3,13 +3,22 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { spawn } from "node:child_process";
 import { request } from "node:http";
 import { join } from "node:path";
 
 import { hostOf } from "../dist/http.js";
 import { matchToken } from "../dist/http-tokens.js";
-import { sandbox } from "./_mcp.mjs";
+import { CLI, sandbox } from "./_mcp.mjs";
 import { addToken, startHttpServer, tokenCli } from "./_http.mjs";
 
 const HTTP_CONFIG = { http: { port: 0 } };
@@ -261,7 +270,8 @@ test("healthz needs no auth; other paths 404; GET 405; bad JSON 400; big body 41
       }
     })().catch(() => {});
   });
-  assert.equal(chunked, 413);
+  // 413, or a reset if the close dropped the answer while data was in flight.
+  assert.ok(chunked === 413 || chunked === "error", String(chunked));
 
   // The server is still healthy after all that.
   assert.equal((await s.post("tools/list", {})).status, 200);
@@ -360,4 +370,152 @@ test("a client disconnect aborts the server-side wait", async (t) => {
   }
   assert.ok(line, "wait_task ended after the disconnect");
   assert.ok(JSON.parse(line).duration_ms < 10_000, line);
+});
+
+test("token commands refuse to run inside a delegated task", () => {
+  const b = box();
+  const env = { ...b.env, CLAUDECODE_MCP_DEPTH: "1" };
+  for (const args of [["add", "x"], ["list"], ["revoke", "x"]]) {
+    const r = tokenCli(env, ...args);
+    assert.equal(r.status, 1, args.join(" "));
+    assert.match(r.stderr, /refuse to run inside a delegated task/);
+  }
+});
+
+test("concurrent token adds never lose an entry (lock file)", async () => {
+  const b = box();
+  const names = Array.from({ length: 8 }, (_, i) => `dev${i}`);
+  const codes = await Promise.all(
+    names.map(
+      (n) =>
+        new Promise((resolve) =>
+          spawn(process.execPath, [CLI, "token", "add", n], { env: b.env, stdio: "ignore" }).on(
+            "exit",
+            resolve,
+          ),
+        ),
+    ),
+  );
+  assert.deepEqual(
+    codes,
+    names.map(() => 0),
+  );
+  const listed = JSON.parse(readFileSync(b.tokensFile, "utf8")).tokens.map((t) => t.name);
+  assert.deepEqual(listed.sort(), names);
+});
+
+test("a symlinked tokens file or an unsafe folder is refused", async () => {
+  const b = box();
+  const real = join(b.dir, "real-tokens.json");
+  addToken({ ...b.env, CLAUDECODE_MCP_CONFIG: join(b.dir, "other", "config.json") });
+  // Put a valid file somewhere else and point the tokens path at it.
+  writeFileSync(real, readFileSync(join(b.dir, "other", "http-tokens.json")), { mode: 0o600 });
+  symlinkSync(real, b.tokensFile);
+  await assert.rejects(startHttpServer(b.env), /is a symlink/);
+  assert.equal(tokenCli(b.env, "list").status, 1);
+
+  const shared = join(b.dir, "shared");
+  mkdirSync(shared);
+  chmodSync(shared, 0o777);
+  const env = { ...b.env, CLAUDECODE_MCP_CONFIG: join(shared, "config.json") };
+  writeFileSync(join(shared, "config.json"), readFileSync(b.env.CLAUDECODE_MCP_CONFIG));
+  const r = tokenCli(env, "add", "x");
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /folder is writable by other users/);
+});
+
+test("deleted or edited-in-place tokens files take effect at once", async (t) => {
+  const s = await server(t);
+  assert.equal((await s.post("tools/list", {})).status, 200);
+  // Same size, same inode, new content: must still be noticed.
+  const raw = readFileSync(s.tokensFile, "utf8");
+  const hash = JSON.parse(raw).tokens[0].sha256;
+  const other = (hash[0] === "a" ? "b" : "a") + hash.slice(1);
+  writeFileSync(s.tokensFile, raw.replace(hash, other));
+  assert.equal((await s.post("tools/list", {})).status, 401);
+  writeFileSync(s.tokensFile, raw);
+  assert.equal((await s.post("tools/list", {})).status, 200);
+  rmSync(s.tokensFile);
+  assert.equal((await s.post("tools/list", {})).status, 401);
+});
+
+test("early rejections close the connection; path variants get 404", async (t) => {
+  const s = await server(t);
+  const r = await fetch(`${s.base}/mcp`, { method: "POST", body: "{}" });
+  assert.equal(r.status, 401);
+  assert.equal(r.headers.get("connection"), "close");
+  for (const path of ["/mcp/", "/MCP", "/mcp%2f", "//mcp", "/mcp/../mcp"]) {
+    const st = await new Promise((resolve, reject) => {
+      const req = request(
+        {
+          host: "127.0.0.1",
+          port: s.port,
+          path,
+          method: "POST",
+          headers: { authorization: `Bearer ${s.token}` },
+        },
+        (res) => {
+          res.resume();
+          resolve(res.statusCode);
+        },
+      );
+      req.on("error", reject);
+      req.end("{}");
+    });
+    assert.equal(st, 404, path);
+  }
+  // Absolute-form request target.
+  const abs = await new Promise((resolve, reject) => {
+    const req = request(
+      {
+        host: "127.0.0.1",
+        port: s.port,
+        path: `http://127.0.0.1:${s.port}/mcp`,
+        method: "POST",
+        headers: { authorization: `Bearer ${s.token}` },
+      },
+      (res) => {
+        res.resume();
+        resolve(res.statusCode);
+      },
+    );
+    req.on("error", reject);
+    req.end("{}");
+  });
+  assert.equal(abs, 404);
+});
+
+test("SIGTERM: the grace period ends requests that run too long", async (t) => {
+  const b = box({}, { CLAUDECODE_MCP_HTTP_GRACE_MS: "1000" });
+  const token = addToken(b.env);
+  const srv = await startHttpServer(b.env, { token });
+  t.after(() => srv.stop());
+  const start = await srv.call("start_task", { prompt: "HANG", repo: b.repo });
+  assert.equal(start.isError, false, start.text);
+  t.after(async () => {
+    const again = await startHttpServer(b.env, { token });
+    await again.call("cancel_task", { task_id: start.json.task_id }, { timeoutMs: 30_000 });
+    again.stop();
+  });
+  const pending = srv
+    .call("wait_task", { task_id: start.json.task_id, timeout_s: 50 })
+    .catch(() => "cut");
+  await new Promise((r) => setTimeout(r, 300));
+  const t0 = Date.now();
+  srv.child.kill("SIGTERM");
+  const exit = await srv.exited;
+  assert.equal(exit.code, 0);
+  assert.ok(Date.now() - t0 < 8_000, "exited soon after the grace period");
+  assert.match(srv.stderr(), /"phase":"http_stopped","unfinished":1/);
+  await pending;
+});
+
+test("a second server on a taken port fails to start", async (t) => {
+  const s = await server(t);
+  writeFileSync(
+    s.env.CLAUDECODE_MCP_CONFIG,
+    JSON.stringify({ allowed_roots: [s.dir], http: { port: s.port } }),
+  );
+  await assert.rejects(startHttpServer(s.env), /EADDRINUSE/);
+  assert.equal((await s.post("tools/list", {})).status, 200);
 });

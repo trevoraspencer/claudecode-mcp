@@ -4,21 +4,24 @@
  * The tokens file holds only SHA-256 hashes, one named entry per client
  * device, so one device can be revoked without touching the others. The
  * file must be a private regular file (mode 0600, owned by the current
- * user). `claudecode-mcp token add|list|revoke` manages it; the HTTP server
- * re-reads it when it changes, so a revoke takes effect without a restart.
+ * user, not a symlink) in a folder only its owner (or root) can change.
+ * `claudecode-mcp token add|list|revoke` manages it under a lock file; the
+ * HTTP server re-reads it on every request, so a revoke takes effect at once.
  */
 
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import {
   chmodSync,
   closeSync,
+  constants,
+  fstatSync,
   fsyncSync,
-  lstatSync,
   mkdirSync,
   openSync,
-  readFileSync,
+  readSync,
   renameSync,
   rmSync,
+  statSync,
   writeSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
@@ -71,38 +74,123 @@ function sha256(text: string): Buffer {
   return createHash("sha256").update(text, "utf8").digest();
 }
 
+function sha256Hex(data: Buffer): string {
+  return createHash("sha256").update(data).digest("hex");
+}
+
 /**
- * Read and check the tokens file. A missing file is an empty list. Anything
- * else that is wrong (symlink, other owner, group/world access, bad JSON) is
- * an error: a token file others can read or replace is not a secret.
+ * The folder must not let anyone else swap the file: owned by the current
+ * user or root, and not group/world writable (unless sticky, like /tmp).
  */
-export function readTokens(path: string): TokenEntry[] {
+function checkParent(path: string): void {
+  const dir = dirname(path);
   let st;
   try {
-    st = lstatSync(path);
+    st = statSync(dir);
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw new TokenFileError(path, `cannot read its folder: ${(err as Error).message}`);
+  }
+  const uid = typeof process.getuid === "function" ? process.getuid() : st.uid;
+  if (st.uid !== uid && st.uid !== 0) {
+    throw new TokenFileError(path, "its folder is owned by another user");
+  }
+  if ((st.mode & 0o022) !== 0 && (st.mode & 0o1000) === 0) {
+    throw new TokenFileError(path, "its folder is writable by other users");
+  }
+}
+
+/**
+ * Read and check the tokens file. A missing file is an empty list. Anything
+ * else that is wrong (symlink, other owner, group/world access, unsafe
+ * folder, bad JSON) is an error: a token file others can read or replace is
+ * not a secret. The checks and the read use one no-follow file descriptor,
+ * so the file cannot be swapped between them. Returns the raw bytes too, so
+ * callers can tell whether the content changed.
+ */
+export function readTokensFile(path: string): { tokens: TokenEntry[]; raw: Buffer } {
+  checkParent(path);
+  let fd: number;
+  try {
+    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return { tokens: [], raw: Buffer.alloc(0) };
+    if (code === "ELOOP") throw new TokenFileError(path, "is a symlink");
     throw new TokenFileError(path, `cannot read: ${(err as Error).message}`);
   }
-  if (!st.isFile()) throw new TokenFileError(path, "not a regular file");
-  if (typeof process.getuid === "function" && st.uid !== process.getuid()) {
-    throw new TokenFileError(path, "owned by another user");
-  }
-  if ((st.mode & 0o077) !== 0) {
-    throw new TokenFileError(path, `mode ${(st.mode & 0o777).toString(8)} is too open; use 0600`);
-  }
-  if (st.size > MAX_TOKENS_FILE_BYTES) {
-    throw new TokenFileError(path, `larger than ${MAX_TOKENS_FILE_BYTES} bytes`);
+  let raw: Buffer;
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) throw new TokenFileError(path, "not a regular file");
+    if (typeof process.getuid === "function" && st.uid !== process.getuid()) {
+      throw new TokenFileError(path, "owned by another user");
+    }
+    if ((st.mode & 0o077) !== 0) {
+      throw new TokenFileError(path, `mode ${(st.mode & 0o777).toString(8)} is too open; use 0600`);
+    }
+    if (st.size > MAX_TOKENS_FILE_BYTES) {
+      throw new TokenFileError(path, `larger than ${MAX_TOKENS_FILE_BYTES} bytes`);
+    }
+    const buf = Buffer.alloc(MAX_TOKENS_FILE_BYTES + 1);
+    let size = 0;
+    for (;;) {
+      const n = readSync(fd, buf, size, buf.length - size, null);
+      if (n === 0) break;
+      size += n;
+      if (size > MAX_TOKENS_FILE_BYTES) {
+        throw new TokenFileError(path, `larger than ${MAX_TOKENS_FILE_BYTES} bytes`);
+      }
+    }
+    raw = buf.subarray(0, size);
+  } finally {
+    closeSync(fd);
   }
   let value: unknown;
   try {
-    value = JSON.parse(readFileSync(path, "utf8"));
+    value = JSON.parse(raw.toString("utf8"));
   } catch (err) {
     throw new TokenFileError(path, `not valid JSON: ${(err as Error).message}`);
   }
   const parsed = fileSchema.safeParse(value);
   if (!parsed.success) throw new TokenFileError(path, z.prettifyError(parsed.error));
-  return parsed.data.tokens;
+  return { tokens: parsed.data.tokens, raw };
+}
+
+export function readTokens(path: string): TokenEntry[] {
+  return readTokensFile(path).tokens;
+}
+
+const LOCK_WAIT_MS = 5_000;
+
+/**
+ * Run a read-modify-write of the tokens file under `<file>.lock`, so two
+ * token commands at once cannot undo each other (a lost revoke).
+ */
+function withTokensLock<T>(path: string, fn: () => T): T {
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const lock = path + ".lock";
+  const deadline = Date.now() + LOCK_WAIT_MS;
+  let fd: number | undefined;
+  while (fd === undefined) {
+    try {
+      fd = openSync(lock, "wx", 0o600);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `tokens file is locked by another token command (${lock}); remove the lock if it is stale`,
+        );
+      }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+    }
+  }
+  try {
+    return fn();
+  } finally {
+    closeSync(fd);
+    rmSync(lock, { force: true });
+  }
 }
 
 /** Atomic write with mode 0600; the parent folder is created with 0700. */
@@ -132,6 +220,10 @@ export function addToken(path: string, name: string): string {
   if (!DEVICE_NAME_RE.test(name)) {
     throw new Error(`device name must match ${DEVICE_NAME_RE.source}`);
   }
+  return withTokensLock(path, () => addTokenLocked(path, name));
+}
+
+function addTokenLocked(path: string, name: string): string {
   const tokens = readTokens(path);
   if (tokens.some((t) => t.name === name)) {
     throw new Error(`a token named "${name}" already exists; revoke it first`);
@@ -149,10 +241,12 @@ export function addToken(path: string, name: string): string {
 
 /** Remove the token for `name`. */
 export function revokeToken(path: string, name: string): void {
-  const tokens = readTokens(path);
-  const kept = tokens.filter((t) => t.name !== name);
-  if (kept.length === tokens.length) throw new Error(`no token named "${name}"`);
-  writeTokens(path, kept);
+  withTokensLock(path, () => {
+    const tokens = readTokens(path);
+    const kept = tokens.filter((t) => t.name !== name);
+    if (kept.length === tokens.length) throw new Error(`no token named "${name}"`);
+    writeTokens(path, kept);
+  });
 }
 
 /**
@@ -173,47 +267,47 @@ export function matchToken(tokens: readonly TokenEntry[], presented: string): st
 }
 
 /**
- * The server's view of the tokens file. Checks the file's identity on each
- * lookup and reloads when it changed. If a reload fails, no token is accepted
- * until the file is fixed (fail closed).
+ * The server's view of the tokens file. Re-reads the file on every lookup
+ * (it is small) and re-parses only when its bytes changed, so no edit can go
+ * unnoticed. If a read fails, no token is accepted until the file is fixed
+ * (fail closed).
  */
 export class TokenStore {
   private tokens: TokenEntry[] = [];
-  private stamp = "";
+  private digest = "";
+  private lastError = "";
 
   constructor(readonly path: string) {}
 
   /** Load at startup. Throws if the file is invalid or holds no tokens. */
   load(): number {
-    this.tokens = readTokens(this.path);
-    this.stamp = this.currentStamp();
-    if (this.tokens.length === 0) {
+    const { tokens, raw } = readTokensFile(this.path);
+    if (tokens.length === 0) {
       throw new TokenFileError(
         this.path,
         "no tokens; create one with `claudecode-mcp token add <device-name>`",
       );
     }
-    return this.tokens.length;
-  }
-
-  private currentStamp(): string {
-    try {
-      const st = lstatSync(this.path);
-      return `${st.ino}:${st.size}:${st.mtimeMs}:${st.ctimeMs}:${st.mode}:${st.uid}`;
-    } catch {
-      return "missing";
-    }
+    this.tokens = tokens;
+    this.digest = sha256Hex(raw);
+    return tokens.length;
   }
 
   private refresh(): void {
-    const stamp = this.currentStamp();
-    if (stamp === this.stamp) return;
-    this.stamp = stamp;
     try {
-      this.tokens = readTokens(this.path);
+      const { tokens, raw } = readTokensFile(this.path);
+      const digest = sha256Hex(raw);
+      if (digest !== this.digest) {
+        this.tokens = tokens;
+        this.digest = digest;
+      }
+      this.lastError = "";
     } catch (err) {
       this.tokens = [];
-      errorLog({ phase: "http_tokens", error: (err as Error).message });
+      this.digest = "";
+      const message = (err as Error).message;
+      if (message !== this.lastError) errorLog({ phase: "http_tokens", error: message });
+      this.lastError = message;
     }
   }
 

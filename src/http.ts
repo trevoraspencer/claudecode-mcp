@@ -21,6 +21,7 @@ import { numFromEnv } from "./env.js";
 import { TokenStore, tokensFilePath } from "./http-tokens.js";
 import { debugLog, errorLog, infoLog, warnLog } from "./log.js";
 import { createServer, createTaskService, prepare } from "./server.js";
+import type { TaskService } from "./service.js";
 
 /** Request body cap. Prompts are capped at 4 MiB; JSON escaping can grow them. */
 export const MAX_BODY_BYTES = 8 * 1024 * 1024;
@@ -70,7 +71,10 @@ function send(
     return;
   }
   const body = JSON.stringify({ jsonrpc: "2.0", error: { code: -32000, message }, id: null });
+  // Error answers close the connection, so a client cannot keep streaming
+  // an unread body into it (Node would otherwise drain it for keep-alive).
   res.writeHead(status, {
+    connection: "close",
     "content-type": "application/json",
     "content-length": Buffer.byteLength(body),
     ...headers,
@@ -133,7 +137,9 @@ export async function serveHttp(env: NodeJS.ProcessEnv = process.env): Promise<H
   const deviceCount = tokens.load();
   const allowedHosts = new Set<string>([...LOOPBACK_HOSTS, ...http.allowed_hosts]);
   const allowedOrigins = new Set(http.allowed_origins);
-  const tasks = createTaskService(ctx);
+  // Started only once the port is ours (below): a server that fails to
+  // listen must not have run recovery or dispatched anything.
+  let tasks: TaskService | undefined;
   const inflight = new Set<ServerResponse>();
   let draining = false;
 
@@ -168,6 +174,7 @@ export async function serveHttp(env: NodeJS.ProcessEnv = process.env): Promise<H
     } catch {
       throw new HttpError(400, "parse error: body is not valid JSON");
     }
+    if (!tasks) throw new HttpError(503, "starting");
     const mcp = createServer(ctx, tasks);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     // A closed response (done, or the client went away) closes this request's
@@ -185,7 +192,7 @@ export async function serveHttp(env: NodeJS.ProcessEnv = process.env): Promise<H
     const path = (req.url ?? "/").split("?")[0];
     if (path === "/healthz") {
       if (req.method === "GET" || req.method === "HEAD") {
-        res.writeHead(200, { "content-type": "text/plain" });
+        res.writeHead(200, { connection: "close", "content-type": "text/plain" });
         res.end(req.method === "HEAD" ? undefined : "ok\n");
       } else {
         send(res, 405, "method not allowed", { allow: "GET, HEAD" });
@@ -197,7 +204,7 @@ export async function serveHttp(env: NodeJS.ProcessEnv = process.env): Promise<H
       return;
     }
     if (draining) {
-      send(res, 503, "shutting down", { connection: "close" });
+      send(res, 503, "shutting down");
       return;
     }
     inflight.add(res);
@@ -220,9 +227,7 @@ export async function serveHttp(env: NodeJS.ProcessEnv = process.env): Promise<H
               ? { "www-authenticate": 'Bearer realm="claudecode-mcp"' }
               : err.status === 405
                 ? { allow: "POST" }
-                : err.status === 413
-                  ? { connection: "close" }
-                  : {},
+                : {},
           );
           return;
         }
@@ -243,6 +248,7 @@ export async function serveHttp(env: NodeJS.ProcessEnv = process.env): Promise<H
     });
   });
   const port = (server.address() as AddressInfo).port;
+  tasks = createTaskService(ctx);
   infoLog({
     phase: "http_listening",
     host: http.host,

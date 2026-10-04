@@ -534,7 +534,13 @@ in journald); `http.host` accepts loopback only; the `Host` check uses
 `http.allowed_hosts` plus loopback names; any `Origin` not in
 `http.allowed_origins` is refused; check order is Host, Origin, token, then
 method (GET/DELETE get 405); `--http` refuses to start at depth ≥ 1; SIGTERM
-waits up to `CLAUDECODE_MCP_HTTP_GRACE_MS` (default 10 s). Code:
+waits up to `CLAUDECODE_MCP_HTTP_GRACE_MS` (default 10 s). The review
+before merge added: tokens file read through one no-follow descriptor and
+its folder checked; the file re-read on every request (change detection by
+content); a lock for `token add`/`revoke`; `token` commands refuse at
+depth ≥ 1 (a task could otherwise mint a token and reach a depth-0 server
+over loopback); error answers close the connection; background work starts
+only after the port is bound. Code:
 `src/http.ts`, `src/http-tokens.ts`; tests: `test/http.test.mjs`.
 
 First plan:

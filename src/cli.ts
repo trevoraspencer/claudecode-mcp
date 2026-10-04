@@ -15,6 +15,7 @@
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { loadConfig } from "./config.js";
+import { currentDepth } from "./depth.js";
 import { runHttp } from "./http.js";
 import { addToken, readTokens, revokeToken, tokensFilePath } from "./http-tokens.js";
 import { fatalLog } from "./log.js";
@@ -94,6 +95,13 @@ function tokenCommand(args: readonly string[]): number {
   if (extra.length > 0 || (needsName ? !name : name !== undefined || sub !== "list")) {
     process.stderr.write(USAGE + "\n");
     return 2;
+  }
+  // A delegated task runs as the same user; letting it mint a token would let
+  // it reach a depth-0 server over loopback and get around the depth guard.
+  if (currentDepth() >= 1) {
+    throw new Error(
+      "token commands refuse to run inside a delegated task (CLAUDECODE_MCP_DEPTH >= 1)",
+    );
   }
   const path = tokensFilePath(loadConfig().config);
   if (sub === "list") {
