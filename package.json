@@ -1,6 +1,7 @@
 {
   "name": "claudecode-mcp",
   "version": "2.0.0",
+  "private": true,
   "description": "MCP server that runs Claude Code as an async task runner: start, track, steer, and collect coding and review tasks.",
   "license": "MIT",
   "author": "Trevor Spencer",
@@ -51,8 +52,7 @@
     "test:live": "CLAUDECODE_MCP_LIVE=1 node --test test/*.test.mjs",
     "format": "prettier --write 'src/**/*.ts' 'test/**/*.mjs'",
     "format:check": "prettier --check 'src/**/*.ts' 'test/**/*.mjs'",
-    "prepack": "npm run build",
-    "prepublishOnly": "npm run build && node -e \"require('fs').statSync('dist/cli.js')\" && npm test"
+    "prepack": "npm run build"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

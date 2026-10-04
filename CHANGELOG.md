@@ -10,8 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [2.0.0] - 2026-10-03
 
 A rewrite: `claudecode-mcp` is now an async task runner for Claude Code
-(see `docs/DESIGN-v2.md` and the README). The date is the release-prep
-date; it moves to the publish date if publishing happens later.
+(see `docs/DESIGN-v2.md` and the README). Installed from source; not
+published to npm.
 
 ### Changed (breaking)
 

@@ -1,7 +1,6 @@
 # claudecode-mcp
 
 [![CI](https://github.com/trevoraspencer/claudecode-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/trevoraspencer/claudecode-mcp/actions/workflows/ci.yml)
-[![npm version](https://img.shields.io/npm/v/claudecode-mcp.svg)](https://www.npmjs.com/package/claudecode-mcp)
 
 An MCP server that runs [Claude Code](https://code.claude.com) as an
 **async task runner**. Any MCP client can hand coding work or a review to
@@ -14,7 +13,8 @@ Claude Code, track progress, steer it, and collect the result.
 - A blocking `ask` tool gives quick, read-only reviews and answers.
 
 The design and its decisions are in [`docs/DESIGN-v2.md`](docs/DESIGN-v2.md).
-Version 1.x (one-shot `claude_prompt*` tools) is still on npm; 2.0 replaces it.
+2.0 replaces the old 1.x one-shot `claude_prompt*` tools. It is installed
+from source; it is not published to npm.
 
 ## Requirements
 
@@ -28,14 +28,20 @@ Version 1.x (one-shot `claude_prompt*` tools) is still on npm; 2.0 replaces it.
 
 ## Install
 
+From source:
+
 ```sh
-npm install -g claudecode-mcp
+git clone https://github.com/trevoraspencer/claudecode-mcp.git
+cd claudecode-mcp
+npm ci
+npm run build
 ```
 
-Register it with your MCP client. For Claude Code:
+Register it with your MCP client, using the absolute path to `dist/cli.js`.
+For Claude Code:
 
 ```sh
-claude mcp add claudecode -- claudecode-mcp
+claude mcp add claudecode -- node /absolute/path/to/claudecode-mcp/dist/cli.js
 ```
 
 Or in a client's JSON config:
@@ -43,13 +49,16 @@ Or in a client's JSON config:
 ```json
 {
   "mcpServers": {
-    "claudecode": { "command": "claudecode-mcp" }
+    "claudecode": {
+      "command": "node",
+      "args": ["/absolute/path/to/claudecode-mcp/dist/cli.js"]
+    }
   }
 }
 ```
 
-From source: `npm install && npm run build`, then use
-`node /absolute/path/to/dist/cli.js` as the command.
+Optional: `npm link` in the clone puts a `claudecode-mcp` command on your
+`PATH`. After `git pull`, run `npm ci && npm run build` again.
 
 ## Tools
 
