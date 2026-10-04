@@ -14,6 +14,7 @@ export const TASK_ID_RE = /^t[0-9a-z]{10}$/;
 export const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 export type TaskStatus =
+  | "queued"
   | "starting"
   | "running"
   | "idle"
@@ -96,6 +97,8 @@ export interface TaskState {
   runner: { pid: number; started_at: string } | null;
   claude_pid: number | null;
   turns: number;
+  /** When the task last entered the queue (max_concurrent or a rate-limit hold). */
+  queued_at?: string;
   turn_started_at: string | null;
   last_event_at: string | null;
   events_bytes: number;

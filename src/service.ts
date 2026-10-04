@@ -24,7 +24,7 @@ import {
   type NewWorktree,
 } from "./git.js";
 import type { Config } from "./config.js";
-import { assertDepthAllowsTasks } from "./depth.js";
+import { assertDepthAllowsTasks, currentDepth } from "./depth.js";
 import {
   RUNNER_CLOSED,
   assertSocketPathFits,
@@ -33,11 +33,13 @@ import {
   launchRunner,
   requestRunner,
   resumeTask,
+  launchInProgress,
   waitForLaunch,
+  withDispatchLock,
   withLaunchLock,
   type SpecInput,
 } from "./launcher.js";
-import { errorLog } from "./log.js";
+import { errorLog, warnLog } from "./log.js";
 import { expandHome, tasksDir } from "./paths.js";
 import { redactSecrets } from "./redaction.js";
 import { isInside, resolveRepo } from "./repo.js";
@@ -56,7 +58,9 @@ import {
 } from "./task-store.js";
 
 /** A turn is in progress (or about to be): waiting makes sense. */
-const BUSY = new Set<TaskStatus>(["starting", "running", "stalled"]);
+const BUSY = new Set<TaskStatus>(["queued", "starting", "running", "stalled"]);
+/** Stuck in "starting" with no runner and no launch for this long: interrupted. */
+const STUCK_STARTING_MS = 60_000;
 /** Finished for good unless a message resumes it. */
 const ENDED = new Set<TaskStatus>(["failed", "timed_out", "cancelled", "closing", "closed"]);
 
@@ -99,6 +103,10 @@ export interface TaskView {
   pending_messages: number;
   result: Record<string, unknown> | null;
   rate_limit: unknown;
+  /** Compact view of the latest rate-limit info (5-hour and 7-day use). */
+  rate_limit_summary?: RateLimitSummary;
+  /** For queued tasks: place in line and why it waits. */
+  queue?: { position: number; active: number; max_concurrent: number; hold_until?: string };
   error: string | null;
   recent: Step[];
   workspace: Workspace;
@@ -239,6 +247,38 @@ export interface CloseResult {
 
 export type Progress = (elapsedS: number, totalS: number, message: string) => void;
 
+export interface RateLimitSummary {
+  status?: string;
+  type?: string;
+  utilization?: number;
+  five_hour_utilization?: number;
+  seven_day_utilization?: number;
+  resets_at?: string;
+}
+
+const epochIso = (v: unknown) =>
+  typeof v === "number" && Number.isFinite(v) ? new Date(v * 1000).toISOString() : undefined;
+
+/** Compact the CLI's rate_limit_info (resetsAt is in epoch seconds). */
+export function summarizeRateLimit(info: unknown): RateLimitSummary | undefined {
+  if (!info || typeof info !== "object") return undefined;
+  const i = info as Record<string, unknown>;
+  const windows = (i.unifiedWindows ?? {}) as Record<string, { utilization?: unknown }>;
+  const num = (v: unknown) => (typeof v === "number" ? v : undefined);
+  const out: RateLimitSummary = {
+    status: typeof i.status === "string" ? i.status : undefined,
+    type: typeof i.rateLimitType === "string" ? i.rateLimitType : undefined,
+    utilization: num(i.utilization),
+    five_hour_utilization: num(windows.five_hour?.utilization),
+    seven_day_utilization: num(windows.seven_day?.utilization),
+    resets_at: epochIso(i.resetsAt),
+  };
+  for (const k of Object.keys(out) as Array<keyof RateLimitSummary>) {
+    if (out[k] === undefined) delete out[k];
+  }
+  return out;
+}
+
 export class TaskService {
   private cliCheck: Promise<string> | null = null;
 
@@ -249,6 +289,154 @@ export class TaskService {
 
   private guard(): void {
     assertDepthAllowsTasks(this.env);
+  }
+
+  // ── queue, dispatch, recovery (DESIGN-v2 section 8) ─────────────────
+
+  private allTasks(): TaskState[] {
+    let names: string[];
+    try {
+      names = readdirSync(tasksDir(this.env)).filter((n) => TASK_ID_RE.test(n));
+    } catch {
+      return [];
+    }
+    const out: TaskState[] = [];
+    for (const name of names) {
+      try {
+        out.push(readTask(name, this.env));
+      } catch {
+        // half-created or unreadable; skip
+      }
+    }
+    return out;
+  }
+
+  /** Tasks holding a slot: a turn in progress, or a runner being launched. */
+  private activeCount(states: TaskState[]): number {
+    return states.filter((s) => {
+      if (s.status === "starting") return runnerAlive(s) || launchInProgress(s.id, this.env);
+      return (s.status === "running" || s.status === "stalled") && runnerAlive(s);
+    }).length;
+  }
+
+  /**
+   * Until when a rate-limit rejection seen by any task still holds (all
+   * tasks share one account). Null when nothing is rejected now.
+   */
+  private rateLimitHoldUntil(states: TaskState[]): number | null {
+    // The newest rate-limit report from any task wins: a later "allowed"
+    // (another window, overage) clears an older rejection.
+    let newest: TaskState | undefined;
+    for (const s of states) {
+      if (!s.rate_limit || !s.last_event_at) continue;
+      if (!newest || s.last_event_at > newest.last_event_at!) newest = s;
+    }
+    const info = newest?.rate_limit as { status?: unknown; resetsAt?: unknown } | undefined;
+    if (info?.status !== "rejected" || typeof info.resetsAt !== "number") return null;
+    const ms = info.resetsAt * 1000;
+    return ms > Date.now() ? ms : null;
+  }
+
+  private slotFree(states: TaskState[]): boolean {
+    return (
+      this.activeCount(states) < this.config.max_concurrent &&
+      this.rateLimitHoldUntil(states) === null
+    );
+  }
+
+  private queue(id: string): void {
+    const s = readTask(id, this.env);
+    if (s.status !== "queued") s.queued_at = new Date().toISOString();
+    s.status = "queued";
+    writeTask(s, this.env);
+  }
+
+  /**
+   * Admit a task: always through the queue (so nobody jumps it), then run
+   * the dispatcher at once. If dispatch cannot run now, the task stays
+   * "queued" and the next dispatcher tick starts it.
+   */
+  private async admit(id: string): Promise<void> {
+    this.queue(id);
+    await this.dispatch().catch((err: Error) =>
+      errorLog({ phase: "dispatch", task_id: id, error: err.message }),
+    );
+  }
+
+  /**
+   * Start queued tasks, oldest first, while slots are free and no rate-limit
+   * rejection holds. Called on a timer by every server; the dispatch lock
+   * keeps concurrent servers within max_concurrent together.
+   */
+  async dispatch(): Promise<number> {
+    if (currentDepth(this.env) >= 1) return 0;
+    return withDispatchLock(this.env, async () => {
+      let started = 0;
+      const tried = new Set<string>();
+      for (;;) {
+        const states = this.allTasks();
+        if (!this.slotFree(states)) return started;
+        const next = states
+          // Never wait on a launch lock while holding the dispatch lock.
+          .filter(
+            (s) => s.status === "queued" && !tried.has(s.id) && !launchInProgress(s.id, this.env),
+          )
+          .sort((a, b) =>
+            (a.queued_at ?? a.created_at).localeCompare(b.queued_at ?? b.created_at),
+          )[0];
+        if (!next) return started;
+        tried.add(next.id);
+        try {
+          await withLaunchLock(next.id, this.env, async () => {
+            const s = readTask(next.id, this.env);
+            if (s.status !== "queued") return;
+            s.status = "starting";
+            writeTask(s, this.env);
+            await launchRunner(next.id, this.env);
+          });
+          started++;
+        } catch (err) {
+          errorLog({ phase: "dispatch", task_id: next.id, error: (err as Error).message });
+        }
+      }
+    });
+  }
+
+  /**
+   * After a restart (or reboot): tasks whose runner died without cleanup, or
+   * that were left "starting" with no runner, become "interrupted". Their
+   * session and pending messages stay; send_message resumes them.
+   */
+  async recover(): Promise<string[]> {
+    if (currentDepth(this.env) >= 1) return [];
+    const changed: string[] = [];
+    const needsRecovery = (s: TaskState) =>
+      !ENDED.has(s.status) &&
+      s.status !== "queued" &&
+      s.status !== "interrupted" &&
+      ((s.runner !== null && !runnerAlive(s)) ||
+        (s.status === "starting" &&
+          s.runner === null &&
+          Date.now() - Date.parse(s.updated_at) > STUCK_STARTING_MS));
+    for (const first of this.allTasks()) {
+      if (!needsRecovery(first) || launchInProgress(first.id, this.env)) continue;
+      // Re-read under the launch lock: another server may have just started
+      // a runner for it, and that runner now owns task.json.
+      await withLaunchLock(first.id, this.env, async () => {
+        const s = readTask(first.id, this.env);
+        if (!needsRecovery(s)) return;
+        s.status = "interrupted";
+        s.runner = null;
+        s.claude_pid = null;
+        s.turn_started_at = null;
+        writeTask(s, this.env);
+        changed.push(s.id);
+      }).catch((err: Error) =>
+        errorLog({ phase: "recover", task_id: first.id, error: err.message }),
+      );
+    }
+    if (changed.length > 0) warnLog({ phase: "recover", interrupted: changed });
+    return changed;
   }
 
   /** Check the CLI version once per server; retry after a failure. */
@@ -296,6 +484,10 @@ export class TaskService {
       pending_messages: s.pending_messages.length,
       result,
       rate_limit: s.rate_limit,
+      ...(summarizeRateLimit(s.rate_limit)
+        ? { rate_limit_summary: summarizeRateLimit(s.rate_limit) }
+        : {}),
+      ...(s.status === "queued" ? { queue: this.queueInfo(s.id) } : {}),
       error: s.error,
       recent: recentSteps(taskFiles(s.id, this.env).events, recent),
       workspace: s.workspace ?? { isolation: "in_place" },
@@ -378,8 +570,22 @@ export class TaskService {
       }
       throw err;
     }
-    await withLaunchLock(id, this.env, () => launchRunner(id, this.env));
+    await this.admit(id);
     return this.view(id, 5);
+  }
+
+  private queueInfo(id: string): NonNullable<TaskView["queue"]> {
+    const states = this.allTasks();
+    const queued = states
+      .filter((s) => s.status === "queued")
+      .sort((a, b) => (a.queued_at ?? a.created_at).localeCompare(b.queued_at ?? b.created_at));
+    const hold = this.rateLimitHoldUntil(states);
+    return {
+      position: queued.findIndex((s) => s.id === id) + 1,
+      active: this.activeCount(states),
+      max_concurrent: this.config.max_concurrent,
+      ...(hold ? { hold_until: new Date(hold).toISOString() } : {}),
+    };
   }
 
   /** createTask hook: build the generated profile files before task.json exists. */
@@ -614,7 +820,7 @@ export class TaskService {
     id: string,
     text: string,
     interrupt: boolean,
-  ): Promise<{ delivery: Delivery | "resumed"; task: TaskView }> {
+  ): Promise<{ delivery: Delivery | "resumed" | "queued"; task: TaskView }> {
     this.guard();
     for (let attempt = 0; attempt < 3; attempt++) {
       const s = this.read(id);
@@ -634,9 +840,15 @@ export class TaskService {
       }
       await this.ensureCli();
       // resumeTask serializes launches; if another caller started a runner
-      // first, loop and deliver over its socket instead.
-      if ((await resumeTask(id, text, this.env)) === "resumed") {
-        return { delivery: "resumed", task: this.view(id, 5) };
+      // first, loop and deliver over its socket instead. With no free slot
+      // the message waits with the task in the queue.
+      const outcome = await resumeTask(id, text, this.env, false);
+      if (outcome !== "runner_alive") {
+        await this.dispatch().catch((err: Error) =>
+          errorLog({ phase: "dispatch", task_id: id, error: err.message }),
+        );
+        const now = this.read(id).status;
+        return { delivery: now === "queued" ? "queued" : "resumed", task: this.view(id, 5) };
       }
     }
     throw new ToolError(`could not deliver the message to task ${id}; try again`);
@@ -658,12 +870,23 @@ export class TaskService {
       }
     }
     if (dead) {
-      const fresh = this.read(id);
-      if (!ENDED.has(fresh.status) || fresh.runner !== null) {
-        if (!ENDED.has(fresh.status)) fresh.status = "cancelled";
-        fresh.runner = null;
-        fresh.claude_pid = null;
-        writeTask(fresh, this.env);
+      // Under the launch lock, so the dispatcher cannot start this task
+      // between our read and write.
+      const seen = s.runner?.started_at;
+      const raced = await withLaunchLock(id, this.env, async () => {
+        const fresh = this.read(id);
+        // A different runner started since we found the socket dead.
+        if (runnerAlive(fresh) && fresh.runner?.started_at !== seen) return true;
+        if (!ENDED.has(fresh.status) || fresh.runner !== null) {
+          if (!ENDED.has(fresh.status)) fresh.status = "cancelled";
+          fresh.runner = null;
+          fresh.claude_pid = null;
+          writeTask(fresh, this.env);
+        }
+        return false;
+      });
+      if (raced) {
+        await requestRunner(id, { op: "cancel" }, this.env, 20_000).catch(() => {});
       }
     }
     return this.view(id, 5);
@@ -750,7 +973,7 @@ export class TaskService {
         this.env,
       ).id;
       id = taskId;
-      await withLaunchLock(taskId, this.env, () => launchRunner(taskId, this.env));
+      await this.admit(taskId);
       const started = Date.now();
       const deadline = started + timeoutS * 1000;
       let nextProgress = started + PROGRESS_EVERY_MS;
@@ -799,11 +1022,13 @@ export class TaskService {
       if (runnerAlive(readTask(id, this.env))) {
         await requestRunner(id, { op: "cancel" }, this.env, 20_000).catch(() => {});
       }
-      const s = readTask(id, this.env);
-      if (runnerAlive(s)) return false;
-      s.status = "closed";
-      writeTask(s, this.env);
-      return true;
+      return await withLaunchLock(id, this.env, async () => {
+        const s = readTask(id, this.env);
+        if (runnerAlive(s)) return false;
+        s.status = "closed";
+        writeTask(s, this.env);
+        return true;
+      });
     } catch {
       return false;
     }

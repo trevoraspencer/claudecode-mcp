@@ -7,6 +7,8 @@
 import { spawn } from "node:child_process";
 import {
   closeSync,
+  linkSync,
+  renameSync,
   openSync,
   readFileSync,
   statSync,
@@ -20,6 +22,7 @@ import { fileURLToPath } from "node:url";
 import { resolveProfile, type Config } from "./config.js";
 import { killGroup, type RunnerRequest, type TaskSummary, type Delivery } from "./runner.js";
 import { recordAlive } from "./session-lock.js";
+import { stateDir } from "./paths.js";
 import { readTask, taskFiles, writeTask, type TaskSpec } from "./task-store.js";
 
 /** macOS limits a unix socket path to 104 bytes including the NUL (Linux: 108). */
@@ -106,8 +109,8 @@ function launchLockPath(taskId: string, env: NodeJS.ProcessEnv): string {
   return join(taskFiles(taskId, env).dir, "launch.lock");
 }
 
-/** A launch lock is live while its holder runs and it is not too old. */
-function launchLockLive(path: string): boolean {
+/** A lock file is live while its holder runs and it is not too old. */
+export function lockFileLive(path: string): boolean {
   let holder: { pid?: unknown; started_at?: unknown };
   try {
     if (Date.now() - statSync(path).mtimeMs > LAUNCH_LOCK_STALE_MS) return false;
@@ -122,17 +125,34 @@ function launchLockLive(path: string): boolean {
   );
 }
 
+/** True while a launch (or close) holds the task's launch lock. */
+export function launchInProgress(taskId: string, env: NodeJS.ProcessEnv): boolean {
+  return lockFileLive(launchLockPath(taskId, env));
+}
+
 /**
  * Run `fn` while holding the task's launch lock (`launch.lock`, created
  * with O_EXCL), so only one caller at a time, in any server process, can
  * start a runner for a task.
  */
-export async function withLaunchLock<T>(
+export function withLaunchLock<T>(
   taskId: string,
   env: NodeJS.ProcessEnv,
   fn: () => Promise<T>,
 ): Promise<T> {
-  const path = launchLockPath(taskId, env);
+  return withFileLock(launchLockPath(taskId, env), `task ${taskId} is busy launching`, fn);
+}
+
+/**
+ * Run `fn` while holding the state dir's dispatch lock, so concurrent
+ * servers never start more runners than `max_concurrent` between them.
+ */
+export function withDispatchLock<T>(env: NodeJS.ProcessEnv, fn: () => Promise<T>): Promise<T> {
+  return withFileLock(join(stateDir(env), "dispatch.lock"), "dispatch is busy", fn);
+}
+
+/** O_EXCL lock file with a holder PID, stale detection, and a heartbeat. */
+async function withFileLock<T>(path: string, busy: string, fn: () => Promise<T>): Promise<T> {
   const deadline = Date.now() + LAUNCH_WAIT_MS;
   const body = JSON.stringify({ pid: process.pid, started_at: new Date().toISOString() });
   for (;;) {
@@ -141,15 +161,31 @@ export async function withLaunchLock<T>(
       break;
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-      if (!launchLockLive(path)) {
+      if (!lockFileLive(path)) {
+        // Take a stale lock over by renaming it aside, then re-checking what
+        // we moved: a blind unlink could delete a fresh lock another waiter
+        // created in between. If we moved a live lock, put it back.
+        const aside = `${path}.stale.${process.pid}.${Math.random().toString(36).slice(2)}`;
         try {
-          unlinkSync(path);
+          renameSync(path, aside);
         } catch {
-          // someone else removed it
+          continue; // someone else moved or removed it
+        }
+        if (lockFileLive(aside)) {
+          try {
+            linkSync(aside, path);
+          } catch {
+            // a new lock exists already; ours is not needed
+          }
+        }
+        try {
+          unlinkSync(aside);
+        } catch {
+          // gone
         }
         continue;
       }
-      if (Date.now() > deadline) throw new RunnerError(`task ${taskId} is busy launching`);
+      if (Date.now() > deadline) throw new RunnerError(busy);
       await sleep(50);
     }
   }
@@ -180,7 +216,7 @@ export async function withLaunchLock<T>(
 export async function waitForLaunch(taskId: string, env: NodeJS.ProcessEnv): Promise<void> {
   const path = launchLockPath(taskId, env);
   const deadline = Date.now() + LAUNCH_WAIT_MS;
-  while (launchLockLive(path)) {
+  while (lockFileLive(path)) {
     if (Date.now() > deadline) throw new RunnerError(`task ${taskId} is busy launching`);
     await sleep(50);
   }
@@ -254,7 +290,9 @@ export async function resumeTask(
   taskId: string,
   text: string,
   env: NodeJS.ProcessEnv = process.env,
-): Promise<"resumed" | "runner_alive"> {
+  /** False: queue the message and leave the task "queued" for the dispatcher. */
+  mayLaunch = true,
+): Promise<"resumed" | "runner_alive" | "queued"> {
   return withLaunchLock(taskId, env, async () => {
     const state = readTask(taskId, env);
     if (hasLiveRunner(state)) {
@@ -273,8 +311,14 @@ export async function resumeTask(
     state.runner = null;
     state.claude_pid = null;
     state.pending_messages.push(text);
-    state.status = "starting";
     state.error = null;
+    if (!mayLaunch) {
+      if (state.status !== "queued") state.queued_at = new Date().toISOString();
+      state.status = "queued";
+      writeTask(state, env);
+      return "queued";
+    }
+    state.status = "starting";
     writeTask(state, env);
     await launchRunner(taskId, env);
     return "resumed";
