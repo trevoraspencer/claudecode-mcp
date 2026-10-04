@@ -1,6 +1,8 @@
 /**
- * The stdio MCP server. Thin by design: task state lives on disk and in the
- * per-task runner processes, not here (see service.ts).
+ * The MCP server: tool registration and the stdio entry point. Thin by
+ * design: task state lives on disk and in the per-task runner processes, not
+ * here (see service.ts). HTTP mode (http.ts) builds one `McpServer` per
+ * request on top of the same shared `TaskService`.
  */
 
 import { readFileSync } from "node:fs";
@@ -119,10 +121,18 @@ interface ToolExtra {
   }) => Promise<void>;
 }
 
-export function createServer(ctx: ServerContext): McpServer {
-  const server = new McpServer({ name: "claudecode-mcp", version: getPackageVersion() });
+/**
+ * The process's one `TaskService`. Restart recovery and the queue dispatcher
+ * start here, so they run once per process however many MCP servers share it.
+ */
+export function createTaskService(ctx: ServerContext): TaskService {
   const tasks = new TaskService(ctx.loaded.config, ctx.env);
   if (ctx.depth === 0) startBackgroundWork(tasks, ctx.env);
+  return tasks;
+}
+
+export function createServer(ctx: ServerContext, tasks: TaskService): McpServer {
+  const server = new McpServer({ name: "claudecode-mcp", version: getPackageVersion() });
   // The SDK's generic overloads infer handler types from the zod shape, which
   // is costly to spell out per tool. The SDK still validates every input
   // against the shape at runtime; handlers declare the parsed type they use.
@@ -374,6 +384,6 @@ function startBackgroundWork(tasks: TaskService, env: NodeJS.ProcessEnv): void {
 
 export async function serve(env: NodeJS.ProcessEnv = process.env): Promise<void> {
   const ctx = prepare(env);
-  const server = createServer(ctx);
+  const server = createServer(ctx, createTaskService(ctx));
   await server.connect(new StdioServerTransport());
 }

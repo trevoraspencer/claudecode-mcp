@@ -466,11 +466,11 @@ Tests: offline tests use a fake `claude` that emits stream-json; live tests
    CLAUDE.md. Revisit if a model is seen running state-changing Bash in plan
    mode.
 
-## 12. Network mode: a dedicated VM on the tailnet (plan, not built)
+## 12. Network mode: a dedicated VM on the tailnet (in progress)
 
-Status: **planned 2026-10-04, not built.** To be executed in a new session,
-one PR per step (N1–N5), each with an independent review before merge, as in
-section 10. Start with the open decisions in 12.8.
+Status: **being built** (started 2026-10-04), one PR per step (N1–N5), each
+with an independent review before merge, as in section 10. The 12.8
+decisions were taken on 2026-10-04. Done: N1. Next: N2.
 
 ### 12.1 Goal
 
@@ -495,7 +495,10 @@ dev machine (MCP client) ──HTTPS (tailnet)──▶ tailscale serve on VM
 |---|---|
 | Exposure | Server listens on `127.0.0.1` only. `tailscale serve` publishes it as HTTPS on `https://<vm>.<tailnet>.ts.net` (tailnet-only, real certificate). Clients must also send a bearer token. |
 | Repos | Cloned on demand by URL: `start_task` / `ask` accept `repo_url` (+ `base_ref`). The VM keeps one managed clone per repo and fetches before each task. Local installs keep using paths. |
-| Results out | **Open** (12.8, decision 1). |
+| Results out | Push branches and open draft PRs (`close_task push_pr`, as built in step 4). The VM holds a GitHub credential limited to the allowlisted repos. |
+| Tokens | One named token per client device, revocable on its own. Only SHA-256 hashes are stored (`http-tokens.json`, 0600). |
+| Identity header | No `Tailscale-User-Login` check. Bearer token plus tailnet ACLs. |
+| Workspaces | `~/claudecode-workspaces`. No automatic pruning; a `prune_workspaces` CLI removes clones with no open tasks when run by hand. |
 | Local install | stdio stays the default mode; nothing changes for local use. |
 
 ### 12.3 Verified facts
@@ -507,12 +510,40 @@ dev machine (MCP client) ──HTTPS (tailnet)──▶ tailscale serve on VM
   `allowedOrigins`).
 - Claude Code registers remote servers with
   `claude mcp add --transport http <name> <url> --header "Authorization: Bearer <token>"`.
-- Not yet verified (check in N1/N4): the exact `tailscale serve` syntax on the
-  installed Tailscale version, and that systemd with `KillMode=process`
-  keeps detached runners alive across a service restart (the default
-  `control-group` would kill them, breaking "tasks survive a restart").
+- Verified in N1: in stateless mode a fresh per-request `McpServer` answers
+  `tools/list` and `tools/call` without a prior `initialize` on that
+  request, and closing it on response close aborts in-flight tool waits.
+  The SDK's own `allowedHosts` compares the full `Host` header with port,
+  so N1 checks the host name itself instead.
+- Not yet verified (check in N4): the exact `tailscale serve` syntax on the
+  installed Tailscale version, which `Host` header it forwards (loopback or
+  the `ts.net` name; add the latter to `http.allowed_hosts`), and that
+  systemd with `KillMode=process` keeps detached runners alive across a
+  service restart (the default `control-group` would kill them, breaking
+  "tasks survive a restart").
 
 ### 12.4 Step N1: HTTP transport and auth
+
+**Done.** As built (differences from the first plan are decisions of
+2026-10-04): per-device tokens instead of one `http.token_file`
+(`claudecode-mcp token add|list|revoke`; hashes only in `http.tokens_file`,
+default `http-tokens.json` next to config.json; the server re-reads the file
+when it changes and fails closed if it turns unsafe); `--http` refuses to
+start with no tokens instead of generating one (a printed token would land
+in journald); `http.host` accepts loopback only; the `Host` check uses
+`http.allowed_hosts` plus loopback names; any `Origin` not in
+`http.allowed_origins` is refused; check order is Host, Origin, token, then
+method (GET/DELETE get 405); `--http` refuses to start at depth ≥ 1; SIGTERM
+waits up to `CLAUDECODE_MCP_HTTP_GRACE_MS` (default 10 s). The review
+before merge added: tokens file read through one no-follow descriptor and
+its folder checked; the file re-read on every request (change detection by
+content); a lock for `token add`/`revoke`; `token` commands refuse at
+depth ≥ 1 (a task could otherwise mint a token and reach a depth-0 server
+over loopback); error answers close the connection; background work starts
+only after the port is bound. Code:
+`src/http.ts`, `src/http-tokens.ts`; tests: `test/http.test.mjs`.
+
+First plan:
 
 - New mode: `claudecode-mcp --http` (stdio stays the default). Config keys:
   `http.host` (default `127.0.0.1`), `http.port` (default `8787`),
@@ -553,7 +584,7 @@ dev machine (MCP client) ──HTTPS (tailnet)──▶ tailscale serve on VM
   (CLI, not MCP) can remove clones with no open tasks.
 - Tests: local bare repos as remotes (allowed by a test-only pattern).
 
-### 12.6 Step N3: results out (after decision 1)
+### 12.6 Step N3: results out (decided: push + draft PRs)
 
 - If **push + draft PRs**: the VM holds a fine-grained GitHub token (or
   deploy keys) limited to the allowlisted repos; `gh auth login --with-token`
@@ -583,7 +614,11 @@ dev machine (MCP client) ──HTTPS (tailnet)──▶ tailscale serve on VM
   (`claudecode-local`), and when to use which (VM: long or risky work,
   parallel tasks; local: quick reviews of local, uncommitted work).
 
-### 12.8 Open decisions for the new session (ask first)
+### 12.8 Decisions (asked and answered 2026-10-04)
+
+Answers: 1. push branches + draft PRs; 2. per-device tokens; 3. skip the
+identity header check; 4. default `~/claudecode-workspaces`, manual prune
+only. The options as asked:
 
 1. **Results out:** push branches + draft PRs (recommended: easiest review
    on GitHub), push branches only, or no push (diff text only).
