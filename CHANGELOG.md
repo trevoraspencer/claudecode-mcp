@@ -57,6 +57,11 @@ v2 rebuild in progress (see `docs/DESIGN-v2.md`). Will ship as 2.0.0.
   (`<Event>:<index>` from your personal `settings.json`), and
   `personal_skills` (linked into a per-task plugin). Broken references stop
   the server at startup. New command `claudecode-mcp list-personal-config`.
+- `max_concurrent` queue: tasks beyond the cap wait as `queued` (persisted)
+  and start oldest first; `get_task` shows the queue position. Restart
+  recovery marks tasks with a dead runner `interrupted` (resume with
+  `send_message`). `get_task` adds `rate_limit_summary` (5-hour and 7-day
+  utilization); a live rate-limit rejection holds the queue until reset.
 
 ### Removed
 

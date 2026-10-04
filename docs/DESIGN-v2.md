@@ -213,7 +213,7 @@ usage, `permission_denials`, and `total_cost_usd` (estimate only on a subscripti
 
 ### Task states
 
-`starting` → `running` ⇄ `idle` (turn done, waiting for messages) →
+(`queued` →) `starting` → `running` ⇄ `idle` (turn done, waiting for messages) →
 `closing` → `closed`. `closing` is set once `close_task`'s checks pass and
 before any slow step (push, folder removal), so the task can never be
 resumed into a folder that is going away; if a step fails, the task stays
@@ -354,13 +354,33 @@ later: run the runner inside tmux (`claude --tmux` exists) for a live view.
 
 ## 8. Limits and safety
 
-- `max_concurrent` running tasks (default 3). More tasks wait as `queued`.
+- `max_concurrent` running tasks (default 3). The cap counts tasks with a
+  turn in progress (or a runner being launched); idle runners do not use a
+  slot, and a message to a live idle runner starts its turn directly. So
+  steering an idle task can briefly exceed the cap (and a rate-limit hold);
+  this is accepted, since that `claude` process is already running. A new
+  runner beyond the cap (`start_task`, `ask`, or a `send_message` that must
+  resume) leaves the task `queued` on disk. Every server runs a dispatcher
+  (every 2 s, `CLAUDECODE_MCP_DISPATCH_MS`) under a global `dispatch.lock`
+  that starts queued tasks oldest first. New work always enters the queue
+  first and then triggers a dispatch, so nothing jumps the line, and a
+  dispatch that cannot run now leaves the task queued for the next tick. `get_task` shows the queue
+  position. `wait_task` and `ask` wait through the queue.
+- Restart recovery: at startup a server marks tasks `interrupted` whose
+  recorded runner is dead (or started before the last boot), and tasks left
+  `starting` for over a minute with no runner or launch. Their session and
+  pending messages stay; `send_message` resumes them.
 - 2 h cap **per turn** (idle time does not count), 10 min stall flag, and an
   event-file cap (`max_events_mb`, default 100). Reaching the event cap stops
   the task as `failed`; the log is never silently truncated.
 - `repo` must be inside `allowed_roots`.
-- Rate limits: store the latest `rate_limit_event`. Show 5-hour utilization in
-  `get_task`; if rejected, set `rate_limited` with the reset time.
+- Rate limits: store the latest `rate_limit_event`. `get_task` shows
+  `rate_limit_summary` (status, 5-hour and 7-day utilization, reset time). A
+  turn that ends in error while the latest status is `rejected` leaves the
+  task `rate_limited`. The newest rate-limit report across tasks (all
+  share one account) decides: while it is an unexpired rejection, the
+  dispatcher starts nothing and queued tasks show `hold_until`; a later
+  `allowed` report clears it.
 - Client-facing errors stay redacted and capped (port from v1).
 
 ## 9. Keep / drop from v1
@@ -401,7 +421,10 @@ Release as **2.0.0** (breaking). Rewrite `AGENTS.md` invariants to match.
    `<Event>:<index>`; broken references fail at startup and at task start;
    open question 6 was probed without touching `~/.claude.json` (see below).
 6. Restart recovery, `interrupted` state, `max_concurrent` queue, rate-limit
-   state.
+   state. **Done.** Decisions (recommended defaults, no answer requested as
+   the session was told to continue): the cap counts active turns, not idle
+   runners; queued state lives on disk; any server dispatches; a live
+   rejection holds the whole queue.
 7. Docs, live tests, 2.0.0 release prep.
 
 Tests: offline tests use a fake `claude` that emits stream-json; live tests

@@ -12,7 +12,8 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { loadConfig, type LoadedConfig } from "./config.js";
 import { currentDepth } from "./depth.js";
-import { debugLog, warnLog } from "./log.js";
+import { numFromEnv } from "./env.js";
+import { debugLog, errorLog, warnLog } from "./log.js";
 import { ensureStateDir } from "./paths.js";
 import { assertProfilesValid } from "./profile.js";
 import { sanitizeForClient } from "./redaction.js";
@@ -72,6 +73,7 @@ const prompt = z
   .min(1)
   .max(4 * 1024 * 1024);
 const statusEnum = z.enum([
+  "queued",
   "starting",
   "running",
   "idle",
@@ -120,6 +122,7 @@ interface ToolExtra {
 export function createServer(ctx: ServerContext): McpServer {
   const server = new McpServer({ name: "claudecode-mcp", version: getPackageVersion() });
   const tasks = new TaskService(ctx.loaded.config, ctx.env);
+  if (ctx.depth === 0) startBackgroundWork(tasks, ctx.env);
   // The SDK's generic overloads infer handler types from the zod shape, which
   // is costly to spell out per tool. The SDK still validates every input
   // against the shape at runtime; handlers declare the parsed type they use.
@@ -342,6 +345,31 @@ export function createServer(ctx: ServerContext): McpServer {
   );
 
   return server;
+}
+
+/**
+ * Restart recovery once, then the queue dispatcher on a timer. Both work
+ * from disk, so any running server can drain the queue.
+ */
+function startBackgroundWork(tasks: TaskService, env: NodeJS.ProcessEnv): void {
+  let busy = true;
+  const tick = () => {
+    if (busy) return;
+    busy = true;
+    tasks
+      .dispatch()
+      .catch((err: Error) => errorLog({ phase: "dispatch", error: err.message }))
+      .finally(() => (busy = false));
+  };
+  // Recover first, then dispatch, so no recovered task is started twice.
+  tasks
+    .recover()
+    .catch((err: Error) => errorLog({ phase: "recover", error: err.message }))
+    .finally(() => {
+      busy = false;
+      tick();
+    });
+  setInterval(tick, numFromEnv("CLAUDECODE_MCP_DISPATCH_MS", 2_000, 60_000)).unref();
 }
 
 export async function serve(env: NodeJS.ProcessEnv = process.env): Promise<void> {

@@ -13,11 +13,11 @@ changing behavior. v2 is built in steps (design section 10), one PR per step.
 v1 (one-shot `claude_prompt*` tools) was removed in step 1 and lives on in the
 1.x releases on npm.
 
-Build status: steps 1-5 are done (skeleton, runner, core MCP tools,
-worktrees, profiles). The server exposes `start_task` (worktree by default, or
+Build status: steps 1-6 are done (skeleton, runner, core MCP tools,
+worktrees, profiles, recovery and queue). The server exposes `start_task` (worktree by default, or
 in_place), `get_task`, `wait_task`, `get_events`, `send_message`,
-`get_diff`, `cancel_task`, `close_task`, `list_tasks`, and `ask`. Restart
-recovery, the `max_concurrent` queue, and rate-limit state (step 6) are next.
+`get_diff`, `cancel_task`, `close_task`, `list_tasks`, and `ask`. Step 7
+(docs, live tests, 2.0.0 release prep) is next.
 
 ## Core commands
 
@@ -134,6 +134,10 @@ Tests live in `test/` and import compiled modules from `dist/`.
   current user, mode 0700.
 - One active `claude` process per session. The CLI does not lock sessions;
   the runner takes `sessions/<session-id>.lock` before it starts `claude`.
+- Start new runners only through the queue gate (`admit`, `dispatch`, or
+  `resumeTask` under `withDispatchLock`) so `max_concurrent` holds across
+  servers. Lock order is always dispatch, then launch; never take the
+  dispatch lock while holding a launch lock.
 - Start runners only under the task's launch lock (`withLaunchLock`,
   `tasks/<id>/launch.lock`), so concurrent calls never start two runners.
   A recorded runner counts as alive only if its PID is alive, started
