@@ -110,3 +110,9 @@ test("isNeverForwarded covers exact names and prefixes", () => {
   assert.equal(isNeverForwarded("CLAUDECODE_MCP_DEPTH"), true);
   assert.equal(isNeverForwarded("CLAUDE_CODE_OAUTH_TOKEN"), false);
 });
+
+test("the server's GitHub push token never reaches a task", () => {
+  const env = buildChildEnv({ parentEnv: { ...BASE, GH_TOKEN: "ghp_server_only" } });
+  assert.equal(env.GH_TOKEN, undefined);
+  assert.equal(env.GITHUB_TOKEN, undefined);
+});

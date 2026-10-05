@@ -470,7 +470,7 @@ Tests: offline tests use a fake `claude` that emits stream-json; live tests
 
 Status: **being built** (started 2026-10-04), one PR per step (N1–N5), each
 with an independent review before merge, as in section 10. The 12.8
-decisions were taken on 2026-10-04. Done: N1, N2. Next: N3.
+decisions were taken on 2026-10-04. Done: N1, N2, N3. Next: N4.
 
 ### 12.1 Goal
 
@@ -495,7 +495,7 @@ dev machine (MCP client) ──HTTPS (tailnet)──▶ tailscale serve on VM
 |---|---|
 | Exposure | Server listens on `127.0.0.1` only. `tailscale serve` publishes it as HTTPS on `https://<vm>.<tailnet>.ts.net` (tailnet-only, real certificate). Clients must also send a bearer token. |
 | Repos | Cloned on demand by URL: `start_task` / `ask` accept `repo_url` (+ `base_ref`). The VM keeps one managed clone per repo and fetches before each task. Local installs keep using paths. |
-| Results out | Push branches and open draft PRs (`close_task push_pr`, as built in step 4). The VM holds a GitHub credential limited to the allowlisted repos. |
+| Results out | Push branches and open draft PRs (`close_task push_pr`). Only the server pushes: a fine-grained PAT (Contents and Pull requests read/write, Metadata read, on the allowlisted repos) in the service's `GH_TOKEN`; tasks never get it. PRs target the branch the task started from. |
 | Tokens | One named token per client device, revocable on its own. Only SHA-256 hashes are stored (`http-tokens.json`, 0600). |
 | Identity header | No `Tailscale-User-Login` check. Bearer token plus tailnet ACLs. |
 | Workspaces | `~/claudecode-workspaces`. No automatic pruning; a `prune_workspaces` CLI removes clones with no open tasks when run by hand. |
@@ -623,6 +623,36 @@ First plan:
 
 ### 12.6 Step N3: results out (decided: push + draft PRs)
 
+**Done.** Decisions (2026-10-04): server-only push credentials (a task
+cannot push or open PRs itself; soft boundary, since tasks run as the same
+Unix user); a fine-grained PAT; PR base is the task's start branch. As
+built: `repo_url` tasks record `base_branch` (the remote default branch, or
+`base_ref` when it names a remote branch; none for tags and commits) and
+`push_pr` passes `--base`; when the server has `GH_TOKEN` (or
+`GITHUB_TOKEN`), that one push runs with `credential.helper=!gh auth
+git-credential` (only if the gh path is plain), so https pushes use the
+server's token; `GH_TOKEN` is not in the child env allowlist; the push uses
+an explicit `refs/heads/<b>:refs/heads/<b>` refspec; before a `repo_url`
+push, the clone's marker and `origin` are checked again (refused before the
+task is marked `closing`); `GH_TOKEN`, `GITHUB_TOKEN`, and `ghp_`/`gho_`/
+`github_pat_` shapes are redacted. VM setup (token, ruleset on the default
+branch) goes in N4.
+
+The review before merge changed: GitHub tokens are removed from every git
+and gh process unless the call needs them (`toolEnv`), because git runs
+task-writable config (hooks, fsmonitor, helpers); clone, fetch, and push of
+a managed clone run with `core.hooksPath=/dev/null`, `core.fsmonitor=false`,
+`--no-verify` for push, and, with a server token, `credential.helper=`
+first (clearing planted helpers, which would get the token on `store`)
+then gh; the push goes to the verified origin URL given explicitly (no
+`pushurl`), under the repo lock, after refusing local `url.*.insteadOf` /
+`pushInsteadOf`, includes, and `remote.origin.pushurl`; gh runs outside the
+clone with `--repo`; private repos are cloned and fetched with the same
+token; only an exact remote branch name becomes `--base` (`main~1` does
+not; `HEAD` means the default branch).
+
+First plan:
+
 - If **push + draft PRs**: the VM holds a fine-grained GitHub token (or
   deploy keys) limited to the allowlisted repos; `gh auth login --with-token`
   on the VM; `close_task push_pr` works as built in step 4. Optionally
@@ -673,5 +703,12 @@ only. The options as asked:
   through Claude in `auto` mode. Keep the VM single-purpose, keep tokens
   per device, and use tailnet ACLs.
 - The subscription login lives on the VM; treat the VM disk as sensitive.
+- Tasks run as the same Unix user as the server. A task that wants the
+  server's `GH_TOKEN` can read it from `/proc/<server-pid>/environ` (or the
+  service's files). Server-only push stops accidental and casual use (no
+  token in the task env, none handed to task-controlled hooks or helpers),
+  not a determined task. Limit the PAT to the allowlisted repos, protect
+  default branches with a ruleset, and set a renewal date. A hard boundary
+  would need tasks under a separate user (not planned).
 - Paths in responses are VM paths; callers must use `get_diff` or git to see
   results, not local file reads.

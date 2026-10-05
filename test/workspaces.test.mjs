@@ -5,6 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   readdirSync,
@@ -15,6 +16,7 @@ import {
 import { join } from "node:path";
 
 import { CLI, sandbox, startServer } from "./_mcp.mjs";
+import { pushArgs } from "../dist/git.js";
 import { addToken, startHttpServer } from "./_http.mjs";
 
 const git = (cwd, ...args) => execFileSync("git", args, { cwd, stdio: "pipe" }).toString().trim();
@@ -317,4 +319,162 @@ test("close delete counts only the task's own commits, even after the base branc
   assert.equal(other.isError, false, other.text);
   const del = await s.call("close_task", { task_id: start.json.task_id, action: "delete" });
   assert.equal(del.isError, false, del.text);
+});
+
+test("pushArgs: explicit URL and refspec, no hooks, helpers cleared before gh", () => {
+  assert.deepEqual(pushArgs("claude/x-1", "https://github.com/o/r", {}), [
+    "-c",
+    "core.hooksPath=/dev/null",
+    "-c",
+    "core.fsmonitor=false",
+    "push",
+    "--no-verify",
+    "--",
+    "https://github.com/o/r",
+    "refs/heads/claude/x-1:refs/heads/claude/x-1",
+  ]);
+  const withToken = pushArgs("b", "u", { GH_TOKEN: "t" });
+  assert.deepEqual(withToken.slice(4, 8), [
+    "-c",
+    "credential.helper=",
+    "-c",
+    "credential.helper=!gh auth git-credential",
+  ]);
+  assert.deepEqual(
+    pushArgs("b", "u", { GITHUB_TOKEN: "t", CLAUDECODE_MCP_GH_BIN: "/opt/gh/bin/gh" }).slice(6, 8),
+    ["-c", "credential.helper=!/opt/gh/bin/gh auth git-credential"],
+  );
+  // A gh path a shell could misread gets no helper.
+  assert.ok(
+    !pushArgs("b", "u", { GH_TOKEN: "t", CLAUDECODE_MCP_GH_BIN: "/x/g h;id" }).some((a) =>
+      a.startsWith("credential.helper"),
+    ),
+  );
+});
+
+function fakeGh(dir) {
+  const bin = join(dir, "gh.sh");
+  const out = join(dir, "gh.args");
+  writeFileSync(
+    bin,
+    '#!/bin/sh\necho "$@" >> "$FAKE_GH_ARGS"\necho https://github.com/o/r/pull/7\n',
+  );
+  chmodSync(bin, 0o755);
+  return { bin, out };
+}
+
+test("push_pr opens the PR against the branch the task started from", async (t) => {
+  const pre = sandbox();
+  const gh = fakeGh(pre.dir);
+  const b = box({}, { CLAUDECODE_MCP_GH_BIN: gh.bin, FAKE_GH_ARGS: gh.out, GH_TOKEN: "srv" });
+  const s = await server(t, b);
+  execFileSync("git", ["commit", "-q", "--allow-empty", "-m", "two"], { cwd: b.src });
+  git(b.src, "push", "-q", "origin", "main");
+  git(b.src, "push", "-q", "origin", "main:feature");
+  git(b.src, "tag", "v1");
+  git(b.src, "push", "-q", "origin", "v1");
+  const cases = [
+    [{}, / --base=main $/],
+    [{ base_ref: "feature" }, / --base=feature $/],
+    [{ base_ref: "v1" }, /^ --draft --head=\S+ $/],
+    [{ base_ref: "main~1" }, /^ --draft --head=\S+ $/],
+    [{ base_ref: "HEAD" }, / --base=main $/],
+  ];
+  for (const [extra, re] of cases) {
+    const start = await s.call("start_task", {
+      prompt: "WRITE c.txt hi\nCOMMIT add c\ndone",
+      repo_url: b.url,
+      ...extra,
+    });
+    assert.equal(start.isError, false, start.text);
+    await waitIdle(s, start.json.task_id);
+    const r = await s.call("close_task", { task_id: start.json.task_id, action: "push_pr" });
+    assert.equal(r.isError, false, r.text);
+    assert.equal(r.json.pr_url, "https://github.com/o/r/pull/7");
+    const line = readFileSync(gh.out, "utf8").split("pr create").at(-1).split("--title=")[0];
+    assert.match(line, re, JSON.stringify(extra));
+  }
+});
+
+test("push_pr refuses when the clone's origin changed, before closing", async (t) => {
+  const b = box();
+  const s = await server(t, b);
+  const start = await s.call("start_task", {
+    prompt: "WRITE d.txt hi\nCOMMIT add d\ndone",
+    repo_url: b.url,
+  });
+  await waitIdle(s, start.json.task_id);
+  const elsewhere = join(b.remotes, "evil.git");
+  execFileSync("git", ["init", "-q", "--bare", elsewhere]);
+  git(b.clone, "remote", "set-url", "origin", `file://${elsewhere}`);
+  const r = await s.call("close_task", { task_id: start.json.task_id, action: "push_pr" });
+  assert.equal(r.isError, true);
+  assert.match(r.text, /no longer points at .*nothing was pushed/);
+  assert.equal(git(elsewhere, "branch", "--list"), "");
+  const v = await s.call("get_task", { task_id: start.json.task_id });
+  assert.ok(!["closing", "closed"].includes(v.json.status), v.json.status);
+});
+
+test("tasks do not get the server's GH_TOKEN", async (t) => {
+  const pre = sandbox();
+  const envOut = join(pre.dir, "child-env.json");
+  const b = box({}, { GH_TOKEN: "server-only-token", CLAUDECODE_MCP_FAKE_ENV_OUT: envOut });
+  const s = await server(t, b);
+  const start = await s.call("start_task", { prompt: "x", repo_url: b.url });
+  await waitIdle(s, start.json.task_id);
+  const childEnv = JSON.parse(readFileSync(envOut, "utf8"));
+  assert.equal(childEnv.GH_TOKEN, undefined);
+  assert.doesNotMatch(JSON.stringify(childEnv), /server-only-token/);
+});
+
+test("hooks and fsmonitor planted in the clone never see the server's token", async (t) => {
+  const pre = sandbox();
+  const leak = join(pre.dir, "leak.txt");
+  const hooks = join(pre.dir, "hooks");
+  mkdirSync(hooks);
+  const spy = `#!/bin/sh\necho "$0 GH_TOKEN=$GH_TOKEN" >> "${leak}"\n`;
+  for (const h of ["pre-push", "reference-transaction", "post-checkout"]) {
+    writeFileSync(join(hooks, h), spy, { mode: 0o755 });
+  }
+  writeFileSync(join(pre.dir, "fsmon.sh"), spy, { mode: 0o755 });
+  const b = box({}, { GH_TOKEN: "server-secret-token" });
+  const s = await server(t, b);
+  const start = await s.call("start_task", {
+    prompt: "WRITE e.txt hi\nCOMMIT add e\ndone",
+    repo_url: b.url,
+  });
+  await waitIdle(s, start.json.task_id);
+  // What a task (same user) could do to the shared clone.
+  git(b.clone, "config", "core.hooksPath", hooks);
+  git(b.clone, "config", "core.fsmonitor", join(pre.dir, "fsmon.sh"));
+  const r = await s.call("close_task", { task_id: start.json.task_id, action: "push_pr" });
+  assert.equal(r.isError, false, r.text);
+  assert.equal(git(b.bare, "branch", "--list", start.json.workspace.branch).length > 0, true);
+  // The planted scripts did run (git status ran fsmonitor), just without the token.
+  assert.ok(existsSync(leak), "planted scripts ran");
+  assert.doesNotMatch(readFileSync(leak, "utf8"), /server-secret-token/);
+});
+
+test("pushurl and pushInsteadOf in the clone's config are refused", async (t) => {
+  const b = box();
+  const s = await server(t, b);
+  const elsewhere = join(b.remotes, "other.git");
+  execFileSync("git", ["init", "-q", "--bare", elsewhere]);
+  for (const [key, value] of [
+    ["remote.origin.pushurl", `file://${elsewhere}`],
+    [`url.file://${elsewhere}.pushInsteadOf`, b.url],
+  ]) {
+    const start = await s.call("start_task", {
+      prompt: "WRITE g.txt hi\nCOMMIT add g\ndone",
+      repo_url: b.url,
+    });
+    assert.equal(start.isError, false, start.text);
+    await waitIdle(s, start.json.task_id);
+    git(b.clone, "config", key, value);
+    const r = await s.call("close_task", { task_id: start.json.task_id, action: "push_pr" });
+    assert.equal(r.isError, true, key);
+    assert.match(r.text, /rewrites its remote/, key);
+    assert.equal(git(elsewhere, "branch", "--list"), "", key);
+    git(b.clone, "config", "--unset", key);
+  }
 });

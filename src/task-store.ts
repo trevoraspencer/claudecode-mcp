@@ -80,6 +80,8 @@ export interface Workspace {
   title?: string;
   /** Canonical repo_url for tasks in a managed clone (section 12.5). */
   repo_url?: string;
+  /** Remote branch the task started from; the PR base for push_pr. */
+  base_branch?: string;
 }
 
 export interface TaskState {

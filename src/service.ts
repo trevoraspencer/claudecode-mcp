@@ -18,6 +18,7 @@ import {
   nestedWorktrees,
   ghBin,
   git,
+  assertNoRemoteRewrites,
   removeWorktree,
   repoTop,
   run,
@@ -46,7 +47,9 @@ import { isInside, resolveRepo } from "./repo.js";
 import { parseRepoUrl } from "./repo-url.js";
 import {
   addAskWorktree,
+  assertCloneOrigin,
   checkRepoUrl,
+  pushManagedBranch,
   removeAskWorktree,
   resolveRemoteBase,
   withManagedClone,
@@ -545,15 +548,12 @@ export class TaskService {
     if (url) {
       // Clone or fetch, then branch from the fresh remote ref, all under the
       // repo lock so no other task fetches into the clone meanwhile.
-      wt = await withManagedClone(url, this.config, this.env, async (clone) =>
-        createWorktree({
-          repo: clone,
-          top: clone,
-          taskId: id,
-          baseRef: await resolveRemoteBase(clone, input.base_ref),
-          title,
-        }),
-      );
+      let baseBranch: string | undefined;
+      wt = await withManagedClone(url, this.config, this.env, async (clone) => {
+        const base = await resolveRemoteBase(clone, input.base_ref);
+        baseBranch = base.branch;
+        return createWorktree({ repo: clone, top: clone, taskId: id, baseRef: base.sha, title });
+      });
       workspace = {
         isolation,
         repo_root: wt.repo_root,
@@ -562,6 +562,7 @@ export class TaskService {
         base_commit: wt.base_commit,
         title,
         repo_url: url.canonical,
+        ...(baseBranch ? { base_branch: baseBranch } : {}),
       };
     } else if (isolation === "worktree") {
       const repo = repoPath!;
@@ -767,6 +768,16 @@ export class TaskService {
           );
         }
       }
+      if (action === "push_pr" && wt.repo_url) {
+        // The task may have changed the shared clone's remote since it was
+        // fetched: never push anywhere but the allowlisted URL.
+        try {
+          await assertCloneOrigin(root, wt.repo_url);
+          await assertNoRemoteRewrites(root);
+        } catch (err) {
+          throw new ToolError(`${(err as Error).message}; nothing was pushed`);
+        }
+      }
       const ignored = exists ? await ignoredPaths(worktree) : [];
 
       // Mark the task as closing before any slow step, so it can never be
@@ -777,10 +788,16 @@ export class TaskService {
 
       if (action === "push_pr") {
         try {
-          await git(["push", "-u", "origin", branch], exists ? worktree : root, {
-            env: this.env,
-            timeoutMs: 120_000,
-          });
+          if (wt.repo_url) {
+            await pushManagedBranch(this.config, this.env, root, wt.repo_url, branch);
+          } else {
+            // A local repo: the user's own remote, credentials, and hooks.
+            await git(
+              ["push", "-u", "origin", `refs/heads/${branch}:refs/heads/${branch}`],
+              exists ? worktree : root,
+              { env: this.env, timeoutMs: 120_000, keepTokens: true },
+            );
+          }
         } catch (err) {
           throw new ToolError(
             `push failed: ${(err as Error).message}. The task is "closing"; fix the remote and call close_task again.`,
@@ -826,14 +843,34 @@ export class TaskService {
       ? `\n\n${redactSecrets(cap(s.result.text, 5_000), secrets)}`
       : "";
     const body = `Opened by claudecode-mcp from task \`${s.id}\`.${summary}`;
+    // For a managed clone, run gh outside the task-writable clone and name
+    // the repo explicitly; a local repo keeps the old in-repo behavior.
+    let repoFlag: string[] = [];
+    if (s.workspace?.repo_url) {
+      cwd = realpathSync.native(tmpdir());
+      const u = parseRepoUrl(s.workspace.repo_url, { allowFile: true });
+      if (u.scheme !== "file") {
+        const name = u.segments.join("/");
+        repoFlag = [`--repo=${u.host === "github.com" ? name : `${u.host}/${name}`}`];
+      }
+    }
     let r;
     try {
       r = await run(
         ghBin(this.env),
         // --flag=value, so a title starting with "-" is never read as a flag.
-        ["pr", "create", "--draft", `--head=${branch}`, `--title=${title}`, `--body=${body}`],
+        [
+          "pr",
+          "create",
+          "--draft",
+          ...repoFlag,
+          `--head=${branch}`,
+          ...(s.workspace?.base_branch ? [`--base=${s.workspace.base_branch}`] : []),
+          `--title=${title}`,
+          `--body=${body}`,
+        ],
         cwd,
-        { env: this.env, timeoutMs: 60_000 },
+        { env: this.env, timeoutMs: 60_000, keepTokens: true },
       );
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === "ENOENT") {
@@ -1043,7 +1080,7 @@ export class TaskService {
         // A throwaway detached worktree at the fresh remote ref; removed below.
         askWorktree = await withManagedClone(url, this.config, this.env, async (clone) => ({
           clone,
-          path: await addAskWorktree(clone, await resolveRemoteBase(clone, input.base_ref)),
+          path: await addAskWorktree(clone, (await resolveRemoteBase(clone, input.base_ref)).sha),
         }));
         workdir = askWorktree.path;
       }
