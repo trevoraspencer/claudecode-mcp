@@ -1,0 +1,40 @@
+# claudecode-mcp HTTP server on a dedicated VM.
+# Paths match docs/DEPLOY-proxmox.md. Install with:
+#   cp examples/claudecode-mcp.service /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now claudecode-mcp
+
+[Unit]
+Description=claudecode-mcp HTTP server
+Documentation=https://github.com/trevoraspencer/claudecode-mcp/blob/main/docs/DEPLOY-proxmox.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=claude
+Group=claude
+WorkingDirectory=/home/claude/claudecode-mcp
+# The service does not read .bashrc. claude's native installer links
+# ~/.local/bin/claude; git, gh, and node are in /usr/bin.
+Environment=PATH=/home/claude/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=CLAUDECODE_MCP_CLAUDE_BIN=/home/claude/.local/bin/claude
+# 0600 file. Holds CLAUDE_CODE_OAUTH_TOKEN and GH_TOKEN. Not optional:
+# a missing file fails the start instead of running without credentials.
+EnvironmentFile=/home/claude/.config/claudecode-mcp/service.env
+ExecStart=/usr/bin/node /home/claude/claudecode-mcp/dist/cli.js --http
+Restart=on-failure
+RestartSec=5
+# Longer than the HTTP grace period (CLAUDECODE_MCP_HTTP_GRACE_MS, default 10s)
+# so a restart can finish in-flight requests before SIGKILL of the main process.
+TimeoutStopSec=20
+# Runners, claude, and git are detached with setsid, which does not leave
+# this cgroup. The default KillMode=control-group would kill them on stop
+# and break "tasks survive a restart". process signals only the main PID.
+# Do not set MemoryMax or TasksMax here: they apply to the whole cgroup,
+# runners included. A reboot still ends runners; the next start marks those
+# tasks interrupted.
+KillMode=process
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

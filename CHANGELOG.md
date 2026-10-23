@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- VM deployment guide: `docs/DEPLOY-proxmox.md` and
+  `examples/claudecode-mcp.service`. The unit runs as `User=claude` with
+  `Restart=on-failure` and `KillMode=process`, so a service restart leaves
+  detached runners alive. `tailscale serve` publishes the loopback HTTP
+  server on the tailnet; the MagicDNS name goes in `http.allowed_hosts`.
 - HTTP mode: `claudecode-mcp --http` serves MCP as stateless Streamable
   HTTP on loopback (`http.host`, default `127.0.0.1:8787/mcp`), for use
   behind `tailscale serve` (see `docs/DESIGN-v2.md` section 12). Every
@@ -41,6 +46,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `GH_TOKEN`. GitHub tokens are removed from all other git and gh
   processes, and remote operations on managed clones run with hooks and
   fsmonitor off and only gh as credential helper.
+
+### Security
+
+- `@modelcontextprotocol/sdk` is 1.32.1 (was 1.29.0). That clears the
+  production advisories on the SDK through 1.31.0. The lockfile also moves
+  to `express` 5.3.0, `proxy-addr` 2.0.8, and `ip-address` 10.7.4. This
+  server does not use the SDK's OAuth client or `requireBearerAuth`. A
+  single stdio message is now bounded at the SDK's 10 MB default, which
+  still holds a 4 MiB prompt.
 
 ## [2.0.0] - 2026-10-03
 
