@@ -507,7 +507,11 @@ dev machine (MCP client) ──HTTPS (tailnet)──▶ tailscale serve on VM
   (`@modelcontextprotocol/sdk/server/streamableHttp.js`) with
   `handleRequest(req, res, body)` on plain `node:http`: **no new runtime
   dependency**. It has DNS-rebinding options (`allowedHosts`,
-  `allowedOrigins`).
+  `allowedOrigins`). The locked dependency is 1.32.1, which keeps that
+  call and clears the production advisories on 1.31.0 and earlier. A
+  pre-parsed body is not subject to the SDK's own 4 MiB read limit; this
+  server still caps the raw body at 8 MiB. Stdio messages are bounded at
+  the SDK's 10 MB default.
 - Claude Code registers remote servers with
   `claude mcp add --transport http <name> <url> --header "Authorization: Bearer <token>"`.
 - Verified in N1: in stateless mode a fresh per-request `McpServer` answers

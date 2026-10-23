@@ -47,6 +47,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   processes, and remote operations on managed clones run with hooks and
   fsmonitor off and only gh as credential helper.
 
+### Security
+
+- `@modelcontextprotocol/sdk` is 1.32.1 (was 1.29.0). That clears the
+  production advisories on the SDK through 1.31.0. The lockfile also moves
+  to `express` 5.3.0, `proxy-addr` 2.0.8, and `ip-address` 10.7.4. This
+  server does not use the SDK's OAuth client or `requireBearerAuth`. A
+  single stdio message is now bounded at the SDK's 10 MB default, which
+  still holds a 4 MiB prompt.
+
 ## [2.0.0] - 2026-10-03
 
 A rewrite: `claudecode-mcp` is now an async task runner for Claude Code
