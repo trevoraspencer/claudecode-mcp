@@ -16,8 +16,9 @@ installed from source and is not published to npm (`"private": true`).
 Build status: all build steps (1-7) are done; 2.0.0 is on `main`. No npm
 package (decision recorded in `docs/DESIGN-v2.md` section 10). Current work: network mode (HTTP over the tailnet on a Proxmox
 VM), steps N1–N5 in `docs/DESIGN-v2.md` section 12. The 12.8 decisions are
-taken; N1 (HTTP transport and auth), N2 (repos by URL), and N3 (results
-out: push + draft PRs) are done; N4 (VM deploy doc and systemd unit) is
+taken; N1 (HTTP transport and auth), N2 (repos by URL), N3 (results
+out: push + draft PRs), and N4 (VM deploy doc and systemd unit,
+`docs/DEPLOY-proxmox.md`) are done; N5 (client setup in the README) is
 next. The server exposes `start_task` (worktree by default, or
 in_place), `get_task`, `wait_task`, `get_events`, `send_message`,
 `get_diff`, `cancel_task`, `close_task`, `list_tasks`, and `ask`.
@@ -106,6 +107,8 @@ Tests live in `test/` and import compiled modules from `dist/`.
   with `tasks/<task-id>/` per task. Override: `CLAUDECODE_MCP_STATE_DIR`.
 - HTTP tokens: `http-tokens.json` next to the config file, or
   `http.tokens_file`. Hashes only; mode 0600.
+- VM deploy: `docs/DEPLOY-proxmox.md`, unit `examples/claudecode-mcp.service`
+  (`KillMode=process`, so a restart leaves detached runners alive).
 - `claude` binary: `claude` on `PATH`. Override: `CLAUDECODE_MCP_CLAUDE_BIN`.
 - Personal Claude home (source of `personal_hooks` / `personal_skills`):
   `$CLAUDE_CONFIG_DIR` or `~/.claude`. `claudecode-mcp list-personal-config`

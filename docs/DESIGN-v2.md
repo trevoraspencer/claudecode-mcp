@@ -1,8 +1,8 @@
 # claudecode-mcp v2 — design
 
 Status: **approved and built**. 2.0.0 is on `main`, installed from source
-(no npm package; see section 10). Next: network mode on a dedicated VM, planned in
-section 12 (not built).
+(no npm package; see section 10). Network mode on a dedicated VM is in
+section 12: N1–N4 are done; N5 (client setup) is next.
 
 ## 1. Goal
 
@@ -470,7 +470,7 @@ Tests: offline tests use a fake `claude` that emits stream-json; live tests
 
 Status: **being built** (started 2026-10-04), one PR per step (N1–N5), each
 with an independent review before merge, as in section 10. The 12.8
-decisions were taken on 2026-10-04. Done: N1, N2, N3. Next: N4.
+decisions were taken on 2026-10-04. Done: N1, N2, N3, N4. Next: N5.
 
 ### 12.1 Goal
 
@@ -515,12 +515,29 @@ dev machine (MCP client) ──HTTPS (tailnet)──▶ tailscale serve on VM
   request, and closing it on response close aborts in-flight tool waits.
   The SDK's own `allowedHosts` compares the full `Host` header with port,
   so N1 checks the host name itself instead.
-- Not yet verified (check in N4): the exact `tailscale serve` syntax on the
-  installed Tailscale version, which `Host` header it forwards (loopback or
-  the `ts.net` name; add the latter to `http.allowed_hosts`), and that
-  systemd with `KillMode=process` keeps detached runners alive across a
-  service restart (the default `control-group` would kill them, breaking
-  "tasks survive a restart").
+- Verified for N4 on 2026-10-23 from current Tailscale source and
+  `systemd.kill(5)`. This environment has no tailnet, and PID 1 is not
+  systemd, so Proxmox itself was not booted. The on-VM curls and the
+  restart check are in `docs/DEPLOY-proxmox.md`.
+  - `tailscale serve` (CLI 1.52 and later):
+    `tailscale serve --bg --yes http://127.0.0.1:8787` proxies
+    `https://<vm>.<tailnet>.ts.net/` to that loopback URL and survives
+    reboot. Funnel stays off.
+  - Host header: for a TCP backend, `ipn/ipnlocal/serve.go`
+    (`reverseProxy.ServeHTTP`) sets the backend `Host` to the incoming
+    host after `SetURL`. Serve's incoming host is the MagicDNS name, so
+    `http.allowed_hosts` lists it. A unix-socket backend would send
+    `localhost` instead; this deploy is TCP. Loopback names stay allowed,
+    so a later build that rewrote `Host` to `127.0.0.1` would still pass.
+    `GET /healthz` does not check `Host`; the `tools/list` curl does.
+  - `KillMode=process` signals only the main PID (`systemd.kill(5)`,
+    systemd 255). Node's `detached: true` is `setsid` and does not leave
+    the service cgroup, so the default `control-group` would kill runners,
+    `claude`, and in-flight git on `systemctl restart`. The unit sets
+    `process` and `TimeoutStopSec=20` (HTTP grace default is 10s). A reboot
+    still ends runners; recovery marks those tasks `interrupted`.
+    `MemoryMax` / `TasksMax` on the unit would cover the same cgroup,
+    runners included.
 
 ### 12.4 Step N1: HTTP transport and auth
 
@@ -636,7 +653,7 @@ an explicit `refs/heads/<b>:refs/heads/<b>` refspec; before a `repo_url`
 push, the clone's marker and `origin` are checked again (refused before the
 task is marked `closing`); `GH_TOKEN`, `GITHUB_TOKEN`, and `ghp_`/`gho_`/
 `github_pat_` shapes are redacted. VM setup (token, ruleset on the default
-branch) goes in N4.
+branch) is in `docs/DEPLOY-proxmox.md` (N4).
 
 The review before merge changed: GitHub tokens are removed from every git
 and gh process unless the call needs them (`toolEnv`), because git runs
@@ -664,17 +681,19 @@ First plan:
 
 ### 12.7 Steps N4–N5: VM deployment and client setup docs
 
-- **N4 `docs/DEPLOY-proxmox.md`** plus `examples/claudecode-mcp.service`:
+- **N4 done.** `docs/DEPLOY-proxmox.md` and `examples/claudecode-mcp.service`.
   VM size (2–4 vCPU, 8 GB RAM, 40 GB disk; Debian 13 or Ubuntu 24.04 LTS),
   a dedicated `claude` user, Node 22, `claude` CLI install, login with
   `claude setup-token` (long-lived `CLAUDE_CODE_OAUTH_TOKEN` in a 0600
-  systemd `EnvironmentFile`) or `claude auth login` over SSH, git and `gh`
-  credentials per decision 1, Tailscale install, `tailscale serve` command,
-  systemd unit (`KillMode=process`, `Restart=on-failure`, `User=claude`),
-  no public ports (host firewall), tailnet ACL limiting which devices may
-  reach the VM, logs via `journalctl`, upgrades (`git pull && npm ci &&
-  npm run build && systemctl restart`), and what to back up (config, token,
-  state dir).
+  systemd `EnvironmentFile`) or `claude auth login` over SSH, `GH_TOKEN`
+  for https clone/fetch/push plus a default-branch ruleset, Tailscale
+  install, `tailscale serve --bg`, the unit (`User=claude`,
+  `Restart=on-failure`, `KillMode=process`, `TimeoutStopSec=20`), no public
+  ports, a tailnet ACL for the VM tag, `journalctl`, upgrades (`git pull &&
+  npm ci && npm run build && systemctl restart`), and what to back up.
+  `allowed_roots` in the sample config is the workspaces directory, so a
+  caller cannot point `repo` at the service checkout or `~/.config`.
+  Verification notes are in 12.3.
 - **N5 client setup in the README:** register the VM on each dev machine
   (`claude mcp add --transport http claudecode-vm https://<vm>.<tailnet>.ts.net/mcp --header "Authorization: Bearer $(cat token)"`),
   keep a local stdio install side by side under another name

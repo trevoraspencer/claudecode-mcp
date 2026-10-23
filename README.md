@@ -78,8 +78,9 @@ claudecode-mcp token revoke macbook # takes effect at once
 `node dist/cli.js --http` from the clone.)
 
 Add the server's tailnet name to `http.allowed_hosts` (see Configuration).
-Full VM setup and client registration are being written up as part of the
-network-mode plan (`docs/DESIGN-v2.md` section 12).
+Standing the server up on a Proxmox VM (systemd, Tailscale, tokens) is
+[`docs/DEPLOY-proxmox.md`](docs/DEPLOY-proxmox.md). Registering that VM on
+a dev machine, next to a local stdio install, is design step N5.
 
 ## Tools
 

@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- VM deployment guide: `docs/DEPLOY-proxmox.md` and
+  `examples/claudecode-mcp.service`. The unit runs as `User=claude` with
+  `Restart=on-failure` and `KillMode=process`, so a service restart leaves
+  detached runners alive. `tailscale serve` publishes the loopback HTTP
+  server on the tailnet; the MagicDNS name goes in `http.allowed_hosts`.
 - HTTP mode: `claudecode-mcp --http` serves MCP as stateless Streamable
   HTTP on loopback (`http.host`, default `127.0.0.1:8787/mcp`), for use
   behind `tailscale serve` (see `docs/DESIGN-v2.md` section 12). Every
