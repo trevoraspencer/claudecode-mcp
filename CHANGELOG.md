@@ -49,6 +49,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- `zod` is 4.6.6 (was 4.6.5), the first release outside
+  [GHSA-mrhx-c7xc-m3w5](https://github.com/advisories/GHSA-mrhx-c7xc-m3w5).
+  npm overrides pin the transitive copies to the first patched releases:
+  `fast-uri` 3.1.9 (was 3.1.8,
+  [GHSA-w74x-v6f9-j3xg](https://github.com/advisories/GHSA-w74x-v6f9-j3xg))
+  and `body-parser` 2.4.0 (was 2.3.0,
+  [GHSA-27r3-jxmh-p828](https://github.com/advisories/GHSA-27r3-jxmh-p828)).
+  `@modelcontextprotocol/sdk` stays at 1.32.1; its ranges already accept
+  these versions, and express 5.3.0 still depends on `body-parser` `^2.3.0`.
+  `body-parser` 2.4.0 requires `qs` `^6.16.1`, so the shared `qs` copy is
+  pinned to 6.16.1 (was 6.16.0), the lowest version that satisfies that
+  range. Its nested `content-type` moves from 2.0.0 to 2.1.0, which express
+  already used.
 - `@modelcontextprotocol/sdk` is 1.32.1 (was 1.29.0). That clears the
   production advisories on the SDK through 1.31.0. The lockfile also moves
   to `express` 5.3.0, `proxy-addr` 2.0.8, and `ip-address` 10.7.4. This
